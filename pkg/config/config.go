@@ -15,8 +15,14 @@ import (
 
 // JcardConfig is the top-level configuration parsed from a jcard.toml file.
 type JcardConfig struct {
+	// Backend selects the hypervisor/sandbox backend: "qemu" (default),
+	// "applevirt", "native", or "proxmox". When empty, resolved from
+	// MB_BACKEND env var or platform default.
+	Backend string `toml:"backend"`
+
 	// Mixtape is the StereOS image to boot, in "name:tag" format.
-	// The tag defaults to "latest" when omitted.
+	// The tag defaults to "latest" when omitted. Not required for
+	// the "native" backend where stereOS is already running on the host.
 	//
 	// Examples:
 	//   "opencode-mixtape"       -> opencode-mixtape:latest

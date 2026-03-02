@@ -13,13 +13,15 @@ type MessageType string
 
 const (
 	// Host -> Guest messages
-	MsgPing         MessageType = "ping"
-	MsgInjectSecret MessageType = "inject_secret"
-	MsgMount        MessageType = "mount"
-	MsgShutdown     MessageType = "shutdown"
-	MsgGetHealth    MessageType = "get_health"
-	MsgSetConfig    MessageType = "set_config"
-	MsgInjectSSHKey MessageType = "inject_ssh_key"
+	MsgPing           MessageType = "ping"
+	MsgInjectSecret   MessageType = "inject_secret"
+	MsgMount          MessageType = "mount"
+	MsgShutdown       MessageType = "shutdown"
+	MsgGetHealth      MessageType = "get_health"
+	MsgSetConfig      MessageType = "set_config"
+	MsgInjectSSHKey   MessageType = "inject_ssh_key"
+	MsgStopAgent      MessageType = "stop_agent"
+	MsgForceStopAgent MessageType = "force_stop_agent"
 
 	// Guest -> Host messages
 	MsgPong      MessageType = "pong"
@@ -119,6 +121,12 @@ type HealthPayload struct {
 type ConfigPayload struct {
 	// Content is the raw jcard.toml content to write inside the guest.
 	Content string `json:"content"`
+}
+
+// StopAgentPayload is the payload for stop_agent and force_stop_agent messages.
+// Unlike shutdown, this stops the agent process without powering off the host.
+type StopAgentPayload struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 // SSHKeyPayload is the payload for inject_ssh_key messages.

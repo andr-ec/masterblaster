@@ -366,6 +366,8 @@ func (d *Daemon) prepareDisk(inst *vm.Instance, cfg *config.JcardConfig, backend
 		return vm.PrepareQEMUDisk(d.baseDir, inst, platform)
 	case "applevirt":
 		return vm.PrepareAppleVirtDisk(d.baseDir, inst)
+	case "native":
+		return vm.PrepareNativeDir(d.baseDir, inst)
 	default:
 		return fmt.Errorf("unknown backend: %s", backend)
 	}
@@ -691,9 +693,13 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 }
 
 // resolveBackend determines the backend type for a VM. Precedence:
-//  1. MB_BACKEND environment variable
-//  2. Platform default: "applevirt" on darwin/arm64, "qemu" elsewhere
-func resolveBackend(_ *config.JcardConfig) string {
+//  1. jcard.toml backend field
+//  2. MB_BACKEND environment variable
+//  3. Platform default: "applevirt" on darwin/arm64, "qemu" elsewhere
+func resolveBackend(cfg *config.JcardConfig) string {
+	if cfg.Backend != "" {
+		return cfg.Backend
+	}
 	if env := os.Getenv("MB_BACKEND"); env != "" {
 		return env
 	}

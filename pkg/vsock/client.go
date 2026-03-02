@@ -200,6 +200,43 @@ func (c *Client) Mount(ctx context.Context, tag, guestPath, fsType string, readO
 	return checkAck(resp, MsgMount)
 }
 
+// StopAgent requests stereosd to stop the agent process without shutting down
+// the host OS. This is used by the native backend where the host is not a
+// dedicated VM and should not be powered off.
+func (c *Client) StopAgent(ctx context.Context, reason string) error {
+	env, err := NewEnvelope(MsgStopAgent, &StopAgentPayload{
+		Reason: reason,
+	})
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.send(ctx, env)
+	if err != nil {
+		return fmt.Errorf("stop agent: %w", err)
+	}
+
+	return checkAck(resp, MsgStopAgent)
+}
+
+// ForceStopAgent requests stereosd to immediately kill the agent process
+// without a grace period. Does not shut down the host OS.
+func (c *Client) ForceStopAgent(ctx context.Context, reason string) error {
+	env, err := NewEnvelope(MsgForceStopAgent, &StopAgentPayload{
+		Reason: reason,
+	})
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.send(ctx, env)
+	if err != nil {
+		return fmt.Errorf("force stop agent: %w", err)
+	}
+
+	return checkAck(resp, MsgForceStopAgent)
+}
+
 // Shutdown requests a graceful shutdown of the StereOS instance.
 func (c *Client) Shutdown(ctx context.Context, reason string) error {
 	env, err := NewEnvelope(MsgShutdown, &ShutdownPayload{
