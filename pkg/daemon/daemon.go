@@ -368,6 +368,8 @@ func (d *Daemon) prepareDisk(inst *vm.Instance, cfg *config.JcardConfig, backend
 		return vm.PrepareAppleVirtDisk(d.baseDir, inst)
 	case "native":
 		return vm.PrepareNativeDir(d.baseDir, inst)
+	case "proxmox":
+		return vm.PrepareProxmoxDir(d.baseDir, inst)
 	default:
 		return fmt.Errorf("unknown backend: %s", backend)
 	}

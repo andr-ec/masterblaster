@@ -55,6 +55,9 @@ type JcardConfig struct {
 
 	// Agent runtime configuration (passed to agentd).
 	Agent AgentConfig `toml:"agent"`
+
+	// Proxmox configuration (only used when backend = "proxmox").
+	Proxmox ProxmoxConfig `toml:"proxmox"`
 }
 
 // ResourcesConfig describes the VM resource allocation.
@@ -126,6 +129,31 @@ type AgentConfig struct {
 
 	// Env are environment variables set only for the agent process.
 	Env map[string]string `toml:"env"`
+}
+
+// ProxmoxConfig holds connection and resource settings for the Proxmox
+// backend. These are only used when backend = "proxmox" in jcard.toml.
+type ProxmoxConfig struct {
+	// Host is the Proxmox API URL (e.g. "https://10.132.132.1:8006").
+	Host string `toml:"host"`
+
+	// TokenID is the PVE API token ID (e.g. "root@pam!mb").
+	TokenID string `toml:"token_id"`
+
+	// TokenSecret is the PVE API token value. Supports ${ENV} expansion.
+	TokenSecret string `toml:"token_secret"`
+
+	// Node is the Proxmox node name (e.g. "pve").
+	Node string `toml:"node"`
+
+	// Storage is the Proxmox storage pool (e.g. "local-zfs").
+	Storage string `toml:"storage"`
+
+	// Bridge is the network bridge (e.g. "vmbr0").
+	Bridge string `toml:"bridge"`
+
+	// TemplateVMID is the VMID of a template to clone for fast VM creation.
+	TemplateVMID int `toml:"template_vmid"`
 }
 
 // Load reads and parses a jcard.toml config file, applies defaults,
@@ -251,6 +279,11 @@ func expandPaths(cfg *JcardConfig, baseDir string) {
 
 	// Expand environment variable references in agent env
 	cfg.Agent.Env = expandEnvMap(cfg.Agent.Env)
+
+	// Expand environment variable references in Proxmox config
+	if cfg.Proxmox.TokenSecret != "" {
+		cfg.Proxmox.TokenSecret = expandEnvVars(cfg.Proxmox.TokenSecret)
+	}
 }
 
 // validate checks that required fields are present and values are sane.

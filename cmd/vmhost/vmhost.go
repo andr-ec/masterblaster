@@ -102,6 +102,8 @@ func bootVM(ctx context.Context, baseDir string, inst *vm.Instance, backend stri
 		return bootAppleVirt(ctx, baseDir, inst, logger)
 	case "native":
 		return bootNative(ctx, baseDir, inst, logger)
+	case "proxmox":
+		return bootProxmox(ctx, baseDir, inst, logger)
 	default:
 		return nil, fmt.Errorf("unknown backend: %s", backend)
 	}
