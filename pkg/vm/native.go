@@ -12,30 +12,35 @@ import (
 	"github.com/papercomputeco/masterblaster/pkg/vsock"
 )
 
-const (
-	// DefaultStereosdSocket is the default path to the stereosd unix socket.
-	DefaultStereosdSocket = "/run/stereos/stereosd.sock"
-)
-
 // NativeBackend implements the Backend interface for running on a host that
 // already has stereosd and agentd running (e.g., an existing NixOS system
 // with stereOS modules imported). No VM is created — the agent runs in a
 // gVisor sandbox managed by the local agentd.
+//
+// Communicates with stereosd via TCP on localhost:1024 (ndjson protocol),
+// NOT the unix socket (which speaks HTTP).
 type NativeBackend struct {
-	baseDir    string
-	socketPath string
+	baseDir string
+	host    string
+	port    int
 }
 
 // NewNativeBackend creates a new native backend.
 func NewNativeBackend(baseDir string) *NativeBackend {
-	socketPath := os.Getenv("MB_STEREOSD_SOCKET")
-	if socketPath == "" {
-		socketPath = DefaultStereosdSocket
+	host := os.Getenv("MB_STEREOSD_HOST")
+	if host == "" {
+		host = "127.0.0.1"
 	}
 	return &NativeBackend{
-		baseDir:    baseDir,
-		socketPath: socketPath,
+		baseDir: baseDir,
+		host:    host,
+		port:    vsock.VsockPort,
 	}
+}
+
+// transport returns a TCPTransport for connecting to local stereosd.
+func (n *NativeBackend) transport() vsock.Transport {
+	return &vsock.TCPTransport{Host: n.host, Port: n.port}
 }
 
 // Up configures and starts an agent sandbox on the local system via stereosd.
@@ -168,7 +173,7 @@ func (n *NativeBackend) Start(ctx context.Context, inst *Instance) error {
 
 // Down stops the agent process without shutting down the host.
 func (n *NativeBackend) Down(ctx context.Context, inst *Instance, timeout time.Duration) error {
-	transport := &vsock.UnixTransport{Path: n.socketPath}
+	transport := n.transport()
 	client, err := vsock.Connect(transport, 5*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to stereosd: %w", err)
@@ -185,7 +190,7 @@ func (n *NativeBackend) Down(ctx context.Context, inst *Instance, timeout time.D
 
 // ForceDown immediately kills the agent process.
 func (n *NativeBackend) ForceDown(ctx context.Context, inst *Instance) error {
-	transport := &vsock.UnixTransport{Path: n.socketPath}
+	transport := n.transport()
 	client, err := vsock.Connect(transport, 5*time.Second)
 	if err != nil {
 		inst.VMState = StateStopped
@@ -211,7 +216,7 @@ func (n *NativeBackend) Destroy(ctx context.Context, inst *Instance) error {
 
 // Status queries stereosd for the current agent health.
 func (n *NativeBackend) Status(_ context.Context, inst *Instance) (State, error) {
-	transport := &vsock.UnixTransport{Path: n.socketPath}
+	transport := n.transport()
 	client, err := vsock.Connect(transport, 2*time.Second)
 	if err != nil {
 		return StateStopped, nil
@@ -289,7 +294,7 @@ func (n *NativeBackend) LoadInstance(name string) (*Instance, error) {
 // provision connects to local stereosd and sends config, secrets, SSH keys,
 // and shared directory mounts.
 func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *config.JcardConfig) error {
-	transport := &vsock.UnixTransport{Path: n.socketPath}
+	transport := n.transport()
 
 	// Connect with retry
 	var client *vsock.Client
@@ -312,7 +317,7 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		}
 	}
 	if client == nil {
-		return fmt.Errorf("could not connect to stereosd at %s after 30s: %w", n.socketPath, err)
+		return fmt.Errorf("could not connect to stereosd at %s:%d after 30s: %w", n.host, n.port, err)
 	}
 	defer func() { _ = client.Close() }()
 
