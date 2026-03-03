@@ -337,7 +337,15 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		return fmt.Errorf("setting config: %w", err)
 	}
 
-	// Inject SSH key
+	// Shared directories — mount first so that SSH key injection lands
+	// inside the mounted tree (e.g. when guest = "/home/admin").
+	for _, shared := range cfg.Shared {
+		if err := client.Mount(ctx, shared.Host, shared.Guest, "bind", shared.ReadOnly); err != nil {
+			return fmt.Errorf("mounting %q at %q: %w", shared.Host, shared.Guest, err)
+		}
+	}
+
+	// Inject SSH key (after mounts so it isn't hidden by a bind mount)
 	if inst.sshPublicKey != "" {
 		if err := client.InjectSSHKey(ctx, "admin", inst.sshPublicKey); err != nil {
 			return fmt.Errorf("injecting SSH key: %w", err)
@@ -348,14 +356,6 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 	for name, value := range cfg.Secrets {
 		if err := client.InjectSecret(ctx, name, value); err != nil {
 			return fmt.Errorf("injecting secret %q: %w", name, err)
-		}
-	}
-
-	// Shared directories — on native, the tag is the host path (used as
-	// the bind mount source by stereosd).
-	for _, shared := range cfg.Shared {
-		if err := client.Mount(ctx, shared.Host, shared.Guest, "bind", shared.ReadOnly); err != nil {
-			return fmt.Errorf("mounting %q at %q: %w", shared.Host, shared.Guest, err)
 		}
 	}
 
