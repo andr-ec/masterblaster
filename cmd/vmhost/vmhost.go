@@ -38,7 +38,7 @@ func NewVMHostCmd(configDirFn func() string) *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", "VM name (required)")
-	cmd.Flags().StringVar(&backend, "backend", "", "Backend type: qemu or applevirt (required)")
+	cmd.Flags().StringVar(&backend, "backend", "", "Backend type: qemu, applevirt, or native (required)")
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("backend")
 
@@ -102,8 +102,6 @@ func bootVM(ctx context.Context, baseDir string, inst *vm.Instance, backend stri
 		return bootAppleVirt(ctx, baseDir, inst, logger)
 	case "native":
 		return bootNative(ctx, baseDir, inst, logger)
-	case "proxmox":
-		return bootProxmox(ctx, baseDir, inst, logger)
 	default:
 		return nil, fmt.Errorf("unknown backend: %s", backend)
 	}
