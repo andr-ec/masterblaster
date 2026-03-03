@@ -345,10 +345,12 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		}
 	}
 
-	// Inject SSH key (after mounts so it isn't hidden by a bind mount)
+	// Inject SSH key for both admin and agent users
 	if inst.sshPublicKey != "" {
-		if err := client.InjectSSHKey(ctx, "admin", inst.sshPublicKey); err != nil {
-			return fmt.Errorf("injecting SSH key: %w", err)
+		for _, user := range []string{"admin", "agent"} {
+			if err := client.InjectSSHKey(ctx, user, inst.sshPublicKey); err != nil {
+				return fmt.Errorf("injecting SSH key for %s: %w", user, err)
+			}
 		}
 	}
 
