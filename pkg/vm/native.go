@@ -207,10 +207,40 @@ func (n *NativeBackend) ForceDown(ctx context.Context, inst *Instance) error {
 	return nil
 }
 
-// Destroy stops the agent and removes the instance directory.
+// Destroy stops the agent, unmounts shared directories, and removes the
+// instance directory. Unmount must happen BEFORE removing inst.Dir,
+// otherwise the bindfs mounts in stereosd would survive with dangling
+// source paths — accumulating zombie mounts across mb up/destroy cycles
+// (one per shared mount per cycle).
 func (n *NativeBackend) Destroy(ctx context.Context, inst *Instance) error {
-	// Try to stop first
+	// Best-effort agent stop. Don't fail destroy if the daemon is gone.
 	_ = n.Down(ctx, inst, 10*time.Second)
+
+	// Best-effort unmount of every share. Read mounts from the on-disk
+	// jcard if inst.Config wasn't loaded by the caller, so destroy works
+	// for instances loaded by name only.
+	cfg := inst.Config
+	if cfg == nil {
+		if loaded, err := config.Load(inst.JcardPath()); err == nil {
+			cfg = loaded
+		}
+	}
+	if cfg != nil && len(cfg.Shared) > 0 {
+		transport := n.transport()
+		if client, err := vsock.Connect(transport, 5*time.Second); err == nil {
+			defer func() { _ = client.Close() }()
+			for _, shared := range cfg.Shared {
+				if err := client.Unmount(ctx, shared.Guest); err != nil {
+					// Don't fail the whole destroy — log and continue.
+					// A leftover mount is recoverable; a half-destroyed
+					// instance directory is not.
+					fmt.Fprintf(os.Stderr, "destroy: unmount %s: %v\n", shared.Guest, err)
+				}
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "destroy: cannot connect to stereosd for unmount: %v\n", err)
+		}
+	}
 
 	if err := os.RemoveAll(inst.Dir); err != nil {
 		return fmt.Errorf("removing instance directory: %w", err)
@@ -364,12 +394,15 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		}
 	}
 
-	// Inject SSH key for both admin and agent users
+	// Inject SSH key for the admin user only. Injecting for `agent` runs
+	// `chmod /home/agent/.ssh` inside stereosd which fails when that path
+	// is bindfs-mounted read-only (e.g. shared from host `~/.ssh`), and
+	// `mb ssh` defaults to admin anyway. Per-sandbox SSH for the agent
+	// user belongs with the per-sandbox-user work (sb-<name>), not the
+	// single-`agent`-user world.
 	if inst.sshPublicKey != "" {
-		for _, user := range []string{"admin", "agent"} {
-			if err := client.InjectSSHKey(ctx, user, inst.sshPublicKey); err != nil {
-				return fmt.Errorf("injecting SSH key for %s: %w", user, err)
-			}
+		if err := client.InjectSSHKey(ctx, "admin", inst.sshPublicKey); err != nil {
+			return fmt.Errorf("injecting SSH key for admin: %w", err)
 		}
 	}
 

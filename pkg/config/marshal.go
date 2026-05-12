@@ -6,11 +6,59 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Marshal serializes a JcardConfig to TOML format.
+// wireAgentConfig is the on-the-wire form of an agent entry sent to
+// stereosd. agentd (papercomputeco/agentd PR #9 and later) parses a
+// `[[agents]]` array, not the user-facing `[agent]` singular table —
+// see ParseConfig in agentd/pkg/config/config.go. Each entry needs a
+// `name` (unique per running sandbox) and `type` ("native" for the
+// in-host backend) on top of the user-supplied harness/prompt/etc.
+type wireAgentConfig struct {
+	Name string `toml:"name"`
+	Type string `toml:"type"`
+	AgentConfig
+}
+
+// wireJcard is the marshaled form of a JcardConfig. It mirrors the
+// user-facing JcardConfig field-for-field except that the singular
+// `Agent` is rewritten as a singleton `[[agents]]` array.
+type wireJcard struct {
+	Backend       string            `toml:"backend,omitempty"`
+	Mixtape       string            `toml:"mixtape,omitempty"`
+	MixtapeDigest string            `toml:"mixtape_digest,omitempty"`
+	Name          string            `toml:"name,omitempty"`
+	Resources     ResourcesConfig   `toml:"resources"`
+	Network       NetworkConfig     `toml:"network"`
+	Shared        []SharedMount     `toml:"shared,omitempty"`
+	Secrets       map[string]string `toml:"secrets"`
+	Agents        []wireAgentConfig `toml:"agents"`
+}
+
+// Marshal serializes a JcardConfig to the TOML form agentd expects.
+// The agent block is emitted as a single-element `[[agents]]` array with
+// `name` (taken from the jcard's top-level name) and `type = "native"`
+// added on. The user-facing input format still uses singular `[agent]`;
+// this is purely a wire-format adapter so we don't bleed multi-agent
+// concepts into the user-edited jcard.
 func Marshal(cfg *JcardConfig) ([]byte, error) {
+	out := wireJcard{
+		Backend:       cfg.Backend,
+		Mixtape:       cfg.Mixtape,
+		MixtapeDigest: cfg.MixtapeDigest,
+		Name:          cfg.Name,
+		Resources:     cfg.Resources,
+		Network:       cfg.Network,
+		Shared:        cfg.Shared,
+		Secrets:       cfg.Secrets,
+		Agents: []wireAgentConfig{{
+			Name:        cfg.Name,
+			Type:        "native",
+			AgentConfig: cfg.Agent,
+		}},
+	}
+
 	var buf bytes.Buffer
 	enc := toml.NewEncoder(&buf)
-	if err := enc.Encode(cfg); err != nil {
+	if err := enc.Encode(&out); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil

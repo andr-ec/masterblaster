@@ -16,6 +16,7 @@ const (
 	MsgPing           MessageType = "ping"
 	MsgInjectSecret   MessageType = "inject_secret"
 	MsgMount          MessageType = "mount"
+	MsgUnmount        MessageType = "unmount"
 	MsgShutdown       MessageType = "shutdown"
 	MsgGetHealth      MessageType = "get_health"
 	MsgSetConfig      MessageType = "set_config"
@@ -81,6 +82,11 @@ type MountPayload struct {
 	GuestPath string `json:"guest_path"`
 	FSType    string `json:"fs_type"`
 	ReadOnly  bool   `json:"read_only,omitempty"`
+}
+
+// UnmountPayload is the payload for unmount messages.
+type UnmountPayload struct {
+	GuestPath string `json:"guest_path"`
 }
 
 // ShutdownPayload is the payload for shutdown messages.

@@ -200,6 +200,26 @@ func (c *Client) Mount(ctx context.Context, tag, guestPath, fsType string, readO
 	return checkAck(resp, MsgMount)
 }
 
+// Unmount requests stereosd to unmount a shared directory previously
+// mounted via Mount. Idempotent on the daemon side: unmounting a path
+// that isn't currently tracked is not an error. Used by `mb destroy`
+// to drop bindfs mounts before removing the host-side source dir.
+func (c *Client) Unmount(ctx context.Context, guestPath string) error {
+	env, err := NewEnvelope(MsgUnmount, &UnmountPayload{
+		GuestPath: guestPath,
+	})
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.send(ctx, env)
+	if err != nil {
+		return fmt.Errorf("unmount %q: %w", guestPath, err)
+	}
+
+	return checkAck(resp, MsgUnmount)
+}
+
 // StopAgent requests stereosd to stop the agent process without shutting down
 // the host OS. This is used by the native backend where the host is not a
 // dedicated VM and should not be powered off.
