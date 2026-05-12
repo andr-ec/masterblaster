@@ -213,7 +213,51 @@ forwards = [
     { host = 0, guest = 80, proto = "tcp" },
 ]
 `),
+			Entry("invalid shared mode", `
+mixtape = "base"
+
+[[shared]]
+host = "./"
+guest = "/workspace"
+mode = "snapshot"
+`),
 		)
+
+		It("should accept shared mode = clone", func() {
+			dir := GinkgoT().TempDir()
+			tomlContent := `
+mixtape = "base"
+
+[[shared]]
+host = "./"
+guest = "/workspace"
+mode = "clone"
+`
+			cfgPath := filepath.Join(dir, "jcard.toml")
+			Expect(os.WriteFile(cfgPath, []byte(tomlContent), 0644)).To(Succeed())
+
+			cfg, err := Load(cfgPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Shared).To(HaveLen(1))
+			Expect(cfg.Shared[0].Mode).To(Equal("clone"))
+		})
+
+		It("should default shared mode to empty (bind)", func() {
+			dir := GinkgoT().TempDir()
+			tomlContent := `
+mixtape = "base"
+
+[[shared]]
+host = "./"
+guest = "/workspace"
+`
+			cfgPath := filepath.Join(dir, "jcard.toml")
+			Expect(os.WriteFile(cfgPath, []byte(tomlContent), 0644)).To(Succeed())
+
+			cfg, err := Load(cfgPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cfg.Shared[0].Mode).To(Equal(""))
+		})
 	})
 
 	Describe("Mixtape name:tag format", func() {

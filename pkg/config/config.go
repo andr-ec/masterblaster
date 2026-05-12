@@ -89,6 +89,16 @@ type SharedMount struct {
 	Host     string `toml:"host"`
 	Guest    string `toml:"guest"`
 	ReadOnly bool   `toml:"readonly"`
+
+	// Mode controls how the host directory is exposed to the sandbox.
+	//   "bind"  (default) — bind-mount host directly; writes go to host
+	//   "clone"           — reflink-copy host to per-sandbox staging on
+	//                       mb up, then bind that. Writes stay in the
+	//                       clone; the original host tree is untouched.
+	// Clone mode requires the staging filesystem to support reflinks
+	// (XFS with reflink=1, or btrfs). cp --reflink=always is used and
+	// fails loudly if unsupported.
+	Mode string `toml:"mode"`
 }
 
 // AgentConfig defines what agent harness to run and how agentd manages it.
@@ -296,6 +306,14 @@ func validate(cfg *JcardConfig) error {
 
 	if cfg.Agent.MaxRestarts < 0 {
 		return fmt.Errorf("agent.max_restarts must be >= 0, got %d", cfg.Agent.MaxRestarts)
+	}
+
+	for i, shared := range cfg.Shared {
+		switch shared.Mode {
+		case "", "bind", "clone":
+		default:
+			return fmt.Errorf("shared[%d].mode must be \"bind\" or \"clone\", got %q", i, shared.Mode)
+		}
 	}
 
 	return nil

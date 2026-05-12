@@ -2,9 +2,13 @@ package vm
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/papercomputeco/masterblaster/pkg/config"
@@ -339,9 +343,24 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 
 	// Shared directories — mount first so that SSH key injection lands
 	// inside the mounted tree (e.g. when guest = "/home/admin").
+	//
+	// For `mode = "clone"` shares, reflink the host source into a per-sandbox
+	// staging dir under inst.Dir/shared/ and bind THAT instead. Writes from
+	// inside the sandbox land in the clone; the original host tree is not
+	// touched. Idempotent: if the staging dir already exists (e.g. mb down →
+	// mb up flow re-enters provision), reuse it so the agent's prior work
+	// survives.
 	for _, shared := range cfg.Shared {
-		if err := client.Mount(ctx, shared.Host, shared.Guest, "bind", shared.ReadOnly); err != nil {
-			return fmt.Errorf("mounting %q at %q: %w", shared.Host, shared.Guest, err)
+		source := shared.Host
+		if shared.Mode == "clone" {
+			cloned, err := ensureCloneStaging(inst.Dir, shared)
+			if err != nil {
+				return fmt.Errorf("clone-staging %q: %w", shared.Host, err)
+			}
+			source = cloned
+		}
+		if err := client.Mount(ctx, source, shared.Guest, "bind", shared.ReadOnly); err != nil {
+			return fmt.Errorf("mounting %q at %q: %w", source, shared.Guest, err)
 		}
 	}
 
@@ -362,6 +381,52 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 	}
 
 	return nil
+}
+
+// ensureCloneStaging reflink-clones a shared.Host directory into a
+// per-sandbox staging path and returns that path. The staging path is
+// stable for the lifetime of the instance (key = sha256 prefix of the
+// guest mount point), so re-entries through provision() (mb down → mb up)
+// reuse the existing clone rather than refreshing from host.
+//
+// Reflinks require the staging filesystem to support extent sharing
+// (XFS with reflink=1, btrfs). `cp -aT --reflink=always` errors out on
+// unsupported filesystems instead of silently falling back to a full
+// copy, which would make clone mode a foot-gun on the wrong host.
+//
+// stereosd's bindfs layer remaps ownership on top of this mount
+// (--force-user=agent), so we deliberately do NOT chown the clone here
+// — files keep the invoking user's ownership on disk, and the agent
+// sees them as `agent` through the bind. New writes from inside the
+// sandbox land on the host owned by the invoking user too.
+func ensureCloneStaging(instDir string, shared config.SharedMount) (string, error) {
+	dst := cloneStagingPath(instDir, shared.Guest)
+	if _, err := os.Stat(dst); err == nil {
+		// Reuse existing clone — survives mb down/up.
+		return dst, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return "", fmt.Errorf("mkdir staging parent: %w", err)
+	}
+	cmd := exec.Command("cp", "-aT", "--reflink=always", shared.Host, dst)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Best-effort cleanup of a partial clone — leftover bytes here
+		// would otherwise be mistaken for a cache hit next time.
+		_ = os.RemoveAll(dst)
+		return "", fmt.Errorf("cp -aT --reflink=always %q -> %q (is the instance dir on XFS/btrfs?): %w: %s",
+			shared.Host, dst, err, strings.TrimSpace(string(out)))
+	}
+	return dst, nil
+}
+
+// cloneStagingPath returns the per-instance staging path for a clone-mode
+// shared mount. Keyed by sha256 prefix of the guest path so multiple
+// shares in one jcard can coexist without name collisions and without
+// leaking filesystem-unfriendly characters from arbitrary guest paths.
+func cloneStagingPath(instDir, guest string) string {
+	sum := sha256.Sum256([]byte(guest))
+	return filepath.Join(instDir, "shared", hex.EncodeToString(sum[:8]))
 }
 
 // PrepareNativeDir creates the instance directory for a native backend
