@@ -362,8 +362,11 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		return fmt.Errorf("waiting for stereosd ready: %w", err)
 	}
 
-	// Send config
-	cfgBytes, err := config.Marshal(cfg)
+	// Send config to stereosd. agentd reads the result via its own config
+	// package (papercomputeco/agentd) which expects the `[[agents]]`
+	// schema — use MarshalForAgentd, NOT the round-trippable Marshal we
+	// use for on-disk state.
+	cfgBytes, err := config.MarshalForAgentd(cfg)
 	if err != nil {
 		return fmt.Errorf("marshaling config: %w", err)
 	}

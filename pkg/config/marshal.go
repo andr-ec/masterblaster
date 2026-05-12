@@ -6,21 +6,36 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// wireAgentConfig is the on-the-wire form of an agent entry sent to
-// stereosd. agentd (papercomputeco/agentd PR #9 and later) parses a
-// `[[agents]]` array, not the user-facing `[agent]` singular table —
-// see ParseConfig in agentd/pkg/config/config.go. Each entry needs a
-// `name` (unique per running sandbox) and `type` ("native" for the
-// in-host backend) on top of the user-supplied harness/prompt/etc.
+// Marshal serializes a JcardConfig to TOML in the SAME schema Load
+// accepts (singular `[agent]` table). Round-trip safe: Load(Marshal(c))
+// returns an equivalent c. Used for on-disk persistence under the mb
+// state directory (`~/.config/mb/vms/<name>/jcard.toml`), where vmhost
+// reads it back via config.Load.
+//
+// For the wire form sent to stereosd/agentd (which expects `[[agents]]`),
+// use MarshalForAgentd. The two schemas exist because mb keeps a
+// one-agent-per-sandbox user surface while agentd parses the multi-agent
+// array introduced in papercomputeco/agentd PR #9.
+func Marshal(cfg *JcardConfig) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := toml.NewEncoder(&buf)
+	if err := enc.Encode(cfg); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// wireAgentConfig is one entry in the `[[agents]]` array agentd parses.
+// On top of mb's user-facing AgentConfig fields it carries `name` and
+// `type` (always "native" for the in-host backend) which agentd needs.
 type wireAgentConfig struct {
 	Name string `toml:"name"`
 	Type string `toml:"type"`
 	AgentConfig
 }
 
-// wireJcard is the marshaled form of a JcardConfig. It mirrors the
-// user-facing JcardConfig field-for-field except that the singular
-// `Agent` is rewritten as a singleton `[[agents]]` array.
+// wireJcard mirrors JcardConfig but with the singular Agent rewritten
+// as a singleton `[[agents]]` array.
 type wireJcard struct {
 	Backend       string            `toml:"backend,omitempty"`
 	Mixtape       string            `toml:"mixtape,omitempty"`
@@ -33,13 +48,14 @@ type wireJcard struct {
 	Agents        []wireAgentConfig `toml:"agents"`
 }
 
-// Marshal serializes a JcardConfig to the TOML form agentd expects.
-// The agent block is emitted as a single-element `[[agents]]` array with
-// `name` (taken from the jcard's top-level name) and `type = "native"`
-// added on. The user-facing input format still uses singular `[agent]`;
-// this is purely a wire-format adapter so we don't bleed multi-agent
-// concepts into the user-edited jcard.
-func Marshal(cfg *JcardConfig) ([]byte, error) {
+// MarshalForAgentd serializes a JcardConfig in the form agentd expects:
+// the agent block is emitted as a single-element `[[agents]]` array
+// with `name` (taken from cfg.Name) and `type = "native"` added. The
+// user-facing input format and the on-disk-saved form still use the
+// singular `[agent]` table — this is purely a wire-format adapter so
+// the multi-agent schema doesn't bleed into user-edited jcards or the
+// mb state directory.
+func MarshalForAgentd(cfg *JcardConfig) ([]byte, error) {
 	out := wireJcard{
 		Backend:       cfg.Backend,
 		Mixtape:       cfg.Mixtape,
