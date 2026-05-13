@@ -64,23 +64,33 @@ func StageReflinks(vmDir string, cfg *config.JcardConfig) error {
 	return nil
 }
 
-// StageDotfiles, when cfg.Dotfiles is set, gathers every listed host
-// path into a CoW bundle under <vmDir>/staging/dotfiles/ and appends a
-// synthetic SharedMount that surfaces the bundle at GuestHome.
+// StageDotfiles, when cfg.Dotfiles is set, assembles a CoW bundle
+// under <vmDir>/staging/dotfiles/ and appends a synthetic SharedMount
+// that surfaces the bundle at GuestHome.
 //
-// Layout: paths under $HOME keep their relative position
-// (~/.claude -> <bundle>/.claude); paths outside $HOME use their
-// basename. Missing source paths are warned-and-skipped so an absent
+// Two layers:
+//
+//  1. If IncludeHomeManagerFor is set, the named user's home-manager
+//     generation (home-files/) is reflinked into the bundle as a
+//     base layer. Surfaces .zshrc / .zshenv / .zsh/ / etc. that the
+//     bundle mount would otherwise shadow.
+//  2. Each Paths entry is reflinked on top. Paths under $HOME keep
+//     their relative position (~/.claude -> <bundle>/.claude); paths
+//     outside $HOME use their basename. User paths overwrite any
+//     same-named entry from the home-manager base.
+//
+// Missing source paths in Paths are warned-and-skipped so an absent
 // dotfile doesn't block boot.
 //
 // Idempotent: re-runs detect the existing synthetic mount and no-op.
 // Schema-list edits require `mb destroy` to re-stage.
 func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
-	if cfg.Dotfiles == nil || len(cfg.Dotfiles.Paths) == 0 {
+	if cfg.Dotfiles == nil ||
+		(len(cfg.Dotfiles.Paths) == 0 && cfg.Dotfiles.IncludeHomeManagerFor == "") {
 		return nil
 	}
 	if cfg.Dotfiles.GuestHome == "" {
-		return fmt.Errorf("dotfiles.guest_home must be set when dotfiles.paths is non-empty")
+		return fmt.Errorf("dotfiles.guest_home must be set when dotfiles.paths or include_home_manager_for is non-empty")
 	}
 
 	bundleDir := filepath.Join(vmDir, "staging", "dotfiles")
@@ -94,6 +104,30 @@ func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
 
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		return fmt.Errorf("dotfiles: mkdir staging: %w", err)
+	}
+
+	// Base layer: home-manager-generated files for the named user. Each
+	// top-level entry of <generation>/home-files/ becomes a bundle
+	// entry. Empty mode-555 nix-store paths give the agent a working
+	// shell init even though our bind mount at GuestHome shadows
+	// /home/<user>'s real symlinks.
+	if cfg.Dotfiles.IncludeHomeManagerFor != "" {
+		hmRoot, err := resolveHomeManagerHomeFiles(cfg.Dotfiles.IncludeHomeManagerFor)
+		if err != nil {
+			return fmt.Errorf("dotfiles: include_home_manager_for=%q: %w",
+				cfg.Dotfiles.IncludeHomeManagerFor, err)
+		}
+		entries, err := os.ReadDir(hmRoot)
+		if err != nil {
+			return fmt.Errorf("dotfiles: reading %s: %w", hmRoot, err)
+		}
+		for _, e := range entries {
+			src := filepath.Join(hmRoot, e.Name())
+			dst := filepath.Join(bundleDir, e.Name())
+			if err := cloneTree(src, dst); err != nil {
+				return fmt.Errorf("dotfiles: clone home-manager %q: %w", e.Name(), err)
+			}
+		}
 	}
 
 	home, err := os.UserHomeDir()
@@ -120,6 +154,11 @@ func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
 
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return fmt.Errorf("dotfiles: mkdir parent for %q: %w", rel, err)
+		}
+		// Remove any home-manager file at this path so the user's
+		// version wins (cp would otherwise nest into the existing dir).
+		if err := os.RemoveAll(dst); err != nil {
+			return fmt.Errorf("dotfiles: remove existing %q: %w", rel, err)
 		}
 		if err := cloneTree(p, dst); err != nil {
 			return fmt.Errorf("dotfiles: clone %q -> %q: %w", p, dst, err)
@@ -153,6 +192,43 @@ func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
 		cfg.Shared...,
 	)
 	return nil
+}
+
+// resolveHomeManagerHomeFiles looks up the host user's home-manager
+// generation by inspecting its systemd unit (`home-manager-<user>.service`)
+// and returns the absolute path to the generation's `home-files/`
+// directory — the tree home-manager would symlink into /home/<user>.
+//
+// We can't just read /home/<user> because by the time mb runs it, the
+// bundle bind mount has typically shadowed those symlinks. The systemd
+// unit's ExecStart names the generation path verbatim, so we parse it
+// out and let the user opt in via [dotfiles].include_home_manager_for.
+func resolveHomeManagerHomeFiles(user string) (string, error) {
+	unit := fmt.Sprintf("home-manager-%s.service", user)
+	out, err := exec.Command("systemctl", "show", unit,
+		"--property=ExecStart", "--no-pager").Output()
+	if err != nil {
+		return "", fmt.Errorf("systemctl show %s: %w", unit, err)
+	}
+	// Example output:
+	//   ExecStart={ path=/nix/store/.../hm-setup-env ; argv[]=/nix/store/.../hm-setup-env /nix/store/.../home-manager-generation ; ignore_errors=no ; ... }
+	const marker = "argv[]="
+	idx := strings.Index(string(out), marker)
+	if idx < 0 {
+		return "", fmt.Errorf("no argv[] in: %s", strings.TrimSpace(string(out)))
+	}
+	// Tokenize the argv list: split on whitespace, take the second
+	// element (the generation path; first is the setup-env binary).
+	fields := strings.Fields(string(out[idx+len(marker):]))
+	if len(fields) < 2 {
+		return "", fmt.Errorf("argv[] has fewer than 2 fields: %s", strings.TrimSpace(string(out)))
+	}
+	generation := fields[1]
+	homeFiles := filepath.Join(generation, "home-files")
+	if _, err := os.Stat(homeFiles); err != nil {
+		return "", fmt.Errorf("home-files not under %q: %w", generation, err)
+	}
+	return homeFiles, nil
 }
 
 // cloneTree recursively copies src to dst using reflink/clonefile where

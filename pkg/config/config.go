@@ -126,6 +126,26 @@ type DotfilesConfig struct {
 	// Missing paths are skipped (warn, not error) so an absent
 	// ~/.aws etc. doesn't block boot.
 	Paths []string `toml:"paths"`
+
+	// IncludeHomeManagerFor, when set, names a host user account whose
+	// home-manager-generated files (.zshrc / .zshenv / .zsh/ / etc.)
+	// should be pre-staged into the bundle as a base layer before the
+	// user-listed Paths overlay on top.
+	//
+	// Needed because mb's bundle mount at GuestHome shadows whatever
+	// the host put at /home/<user>, including the home-manager symlinks
+	// that drive direnv / zoxide / completion hooks. Without this the
+	// agent's interactive zsh hits zsh-newuser-install.
+	//
+	// Resolved at prepare time by reading the user's systemd unit
+	// `home-manager-<user>.service` and parsing the home-manager-
+	// generation path out of its ExecStart, then reflinking
+	// `<generation>/home-files/.` into the bundle. Survives across
+	// home-manager rebuilds because resolution happens every prepare.
+	//
+	// Empty (default) = no auto-include; user is responsible for
+	// listing every dotfile path in Paths.
+	IncludeHomeManagerFor string `toml:"include_home_manager_for"`
 }
 
 // AgentConfig defines what agent harness to run and how agentd manages it.
