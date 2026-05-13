@@ -63,6 +63,33 @@ type JcardConfig struct {
 	// Agents defines the agent harnesses to run inside this sandbox.
 	// Each entry is an independent agent managed by agentd.
 	Agents []AgentConfig `toml:"agents"`
+
+	// Dotfiles, when set, bundles a list of host paths (typically
+	// credentials and config files like ~/.claude, ~/.gitconfig, ~/.ssh)
+	// into a single CoW-staged directory and mounts it at GuestHome
+	// inside the VM. Always reflink-staged — writes inside the guest
+	// never reach the host originals. Mounting at GuestHome shadows
+	// whatever the mixtape put there; pick a different path if you
+	// need the mixtape's defaults to coexist.
+	Dotfiles *DotfilesConfig `toml:"dotfiles"`
+}
+
+// DotfilesConfig describes a bundle of host-side dotfiles to surface
+// inside the guest's user home.
+type DotfilesConfig struct {
+	// GuestHome is the absolute path inside the guest to mount the
+	// bundle at, typically the agent user's home (e.g. "/home/admin").
+	GuestHome string `toml:"guest_home"`
+
+	// Paths is the list of host paths to include. Each path may be
+	// absolute, ~-prefixed (relative to host $HOME), or contain
+	// ${VAR} env references. Paths under $HOME preserve their
+	// position (~/.claude → <guest_home>/.claude); paths outside
+	// $HOME use just their basename.
+	//
+	// Missing paths are skipped (warn, not error) so an absent
+	// ~/.aws etc. doesn't block boot.
+	Paths []string `toml:"paths"`
 }
 
 // ResourcesConfig describes the VM resource allocation.
@@ -97,6 +124,18 @@ type SharedMount struct {
 	Host     string `toml:"host"`
 	Guest    string `toml:"guest"`
 	ReadOnly bool   `toml:"readonly"`
+
+	// Reflink, when true, materializes a copy-on-write snapshot of Host
+	// into the VM's staging directory at prepare time and rewrites Host
+	// to point at the snapshot before the bind mount is set up. Writes
+	// inside the guest land on the snapshot, so the user's original
+	// directory is unaffected — same safety model agents need when the
+	// share points at a live workspace (cwd, dotfiles, etc.).
+	//
+	// Backed by reflink/clonefile where supported (Linux: FICLONE via
+	// `cp --reflink=auto`; macOS: clonefile via `cp -c`). Falls back to
+	// a byte copy on filesystems without CoW support.
+	Reflink bool `toml:"reflink"`
 }
 
 // AgentConfig defines what agent harness to run and how agentd manages it.
@@ -374,6 +413,14 @@ func expandPaths(cfg *JcardConfig, baseDir string) {
 	// Expand shared mount host paths
 	for i := range cfg.Shared {
 		cfg.Shared[i].Host = expandPath(cfg.Shared[i].Host, baseDir)
+	}
+
+	// Expand dotfile paths
+	if cfg.Dotfiles != nil {
+		for i := range cfg.Dotfiles.Paths {
+			cfg.Dotfiles.Paths[i] = expandPath(cfg.Dotfiles.Paths[i], baseDir)
+		}
+		// GuestHome stays as-is — it's an in-guest path, no host expansion.
 	}
 
 	// Expand per-agent paths
