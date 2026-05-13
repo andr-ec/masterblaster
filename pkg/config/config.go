@@ -97,6 +97,18 @@ type SharedMount struct {
 	Host     string `toml:"host"`
 	Guest    string `toml:"guest"`
 	ReadOnly bool   `toml:"readonly"`
+
+	// Reflink, when true, materializes a copy-on-write snapshot of Host
+	// into the VM's staging directory at prepare time and rewrites Host
+	// to point at the snapshot before the bind mount is set up. Writes
+	// inside the guest land on the snapshot, so the user's original
+	// directory is unaffected — same safety model agents need when the
+	// share points at a live workspace (cwd, dotfiles, etc.).
+	//
+	// Backed by reflink/clonefile where supported (Linux: FICLONE via
+	// `cp --reflink=auto`; macOS: clonefile via `cp -c`). Falls back to
+	// a byte copy on filesystems without CoW support.
+	Reflink bool `toml:"reflink"`
 }
 
 // AgentConfig defines what agent harness to run and how agentd manages it.

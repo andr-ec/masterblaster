@@ -71,6 +71,15 @@ func PrepareQEMUDisk(baseDir string, inst *Instance, platform *QEMUPlatformConfi
 		}
 	}
 
+	// Materialize CoW snapshots for any reflink-marked shared mounts.
+	// Mutates cfg.Shared[i].Host to point at <vmDir>/staging/share<i>;
+	// the rewritten paths get persisted by saveJcard below so vmhost
+	// sees them when it re-loads the config.
+	if err := StageReflinks(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging reflink mounts: %w", err)
+	}
+
 	// Save jcard.toml into the VM directory
 	if err := saveJcard(vmDir, cfg); err != nil {
 		_ = os.RemoveAll(vmDir)
