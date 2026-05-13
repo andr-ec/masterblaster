@@ -381,8 +381,22 @@ func PrepareNativeDir(baseDir string, inst *Instance) error {
 	}
 	inst.Dir = vmDir
 
-	// Save jcard.toml
 	cfg := inst.Config
+
+	// Materialize CoW snapshots for reflink-marked shared mounts and
+	// dotfile bundles before saving jcard — the rewritten Host paths
+	// get persisted, and vmhost re-loads from disk and bind-mounts
+	// the staged copies instead of the user's live paths.
+	if err := StageReflinks(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging reflink mounts: %w", err)
+	}
+	if err := StageDotfiles(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging dotfiles: %w", err)
+	}
+
+	// Save jcard.toml
 	if err := saveJcard(vmDir, cfg); err != nil {
 		_ = os.RemoveAll(vmDir)
 		return fmt.Errorf("saving jcard config: %w", err)

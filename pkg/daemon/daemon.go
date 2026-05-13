@@ -689,6 +689,18 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 		}
 	}
 
+	// Pull workdir from the saved jcard so `mb ssh` can land in the
+	// agent's intended cwd. Falls back to inst.Config if loaded, then
+	// to reading the saved jcard, then empty (= $HOME).
+	switch {
+	case inst.Config != nil:
+		info.Workdir = inst.Config.Agent.Workdir
+	default:
+		if cfg, err := config.Load(inst.JcardPath()); err == nil {
+			info.Workdir = cfg.Agent.Workdir
+		}
+	}
+
 	return info
 }
 

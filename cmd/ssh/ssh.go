@@ -73,5 +73,5 @@ func runSSH(baseDir, name, user string, verbose bool) error {
 		ui.Info("Connecting to %s@127.0.0.1:%d", user, sb.SSHPort)
 	}
 
-	return ssh.ExecSSH(user, "127.0.0.1", sb.SSHPort, sb.SSHKeyPath)
+	return ssh.ExecSSH(user, "127.0.0.1", sb.SSHPort, sb.SSHKeyPath, sb.Workdir)
 }

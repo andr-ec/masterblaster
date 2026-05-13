@@ -94,6 +94,16 @@ func PrepareAppleVirtDisk(baseDir string, inst *Instance) error {
 		machineIDBytes = machineID.DataRepresentation()
 	}
 
+	// Stage reflink-marked mounts + dotfile bundle. See prepare.go.
+	if err := StageReflinks(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging reflink mounts: %w", err)
+	}
+	if err := StageDotfiles(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging dotfiles: %w", err)
+	}
+
 	// Save jcard.toml
 	if err := saveJcard(vmDir, cfg); err != nil {
 		_ = os.RemoveAll(vmDir)
