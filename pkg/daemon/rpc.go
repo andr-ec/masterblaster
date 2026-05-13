@@ -52,4 +52,9 @@ type SandboxInfo struct {
 	SSHKeyPath  string `json:"ssh_key_path,omitempty"`
 	VsockPort   int    `json:"vsock_port"`
 	NetworkMode string `json:"network_mode"`
+
+	// Workdir mirrors [agent].workdir from jcard.toml. Used by
+	// `mb ssh` to land interactive shells in the same dir the agent
+	// would; empty means the user's $HOME (sshd default).
+	Workdir string `json:"workdir,omitempty"`
 }

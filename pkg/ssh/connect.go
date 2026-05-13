@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 )
 
@@ -17,7 +18,11 @@ import (
 // -o IdentitiesOnly=yes to prevent the SSH agent or default keys from
 // being tried (which could exhaust MaxAuthTries before the correct
 // ephemeral key is attempted).
-func ExecSSH(user, host string, port int, identityFile string) error {
+//
+// If workdir is non-empty, the remote shell cd's there before becoming
+// interactive. Mirrors [agent].workdir from jcard.toml so the operator
+// lands in the same dir the harness runs in.
+func ExecSSH(user, host string, port int, identityFile, workdir string) error {
 	sshBin, err := exec.LookPath("ssh")
 	if err != nil {
 		return fmt.Errorf("ssh binary not found: %w", err)
@@ -39,6 +44,24 @@ func ExecSSH(user, host string, port int, identityFile string) error {
 
 	args = append(args, fmt.Sprintf("%s@%s", user, host))
 
+	// Land in the configured workdir, then exec a login shell. `cd`
+	// is silent-failing so a missing workdir doesn't leave the user
+	// at a broken shell; ${SHELL:-/bin/bash} preserves whatever
+	// /etc/passwd has set as the user's login shell.
+	if workdir != "" {
+		args = append(args, fmt.Sprintf(
+			"cd %s 2>/dev/null; exec ${SHELL:-/bin/bash} -l",
+			shellQuote(workdir),
+		))
+	}
+
 	// Replace process -- never returns on success
 	return syscall.Exec(sshBin, args, os.Environ())
+}
+
+// shellQuote single-quotes a path for safe inclusion in a remote
+// command. Wrap in single quotes; embedded single quotes are escaped
+// by closing-and-reopening: `'\''`.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
