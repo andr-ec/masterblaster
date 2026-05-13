@@ -55,6 +55,14 @@ type JcardConfig struct {
 
 	// Agent runtime configuration (passed to agentd).
 	Agent AgentConfig `toml:"agent"`
+
+	// Dotfiles, when set, bundles a list of host paths (credentials,
+	// configs, ssh keys) into a single CoW-staged directory and mounts
+	// it at GuestHome inside the sandbox. Always reflink-staged — writes
+	// inside the guest never reach host originals. Shadows whatever the
+	// mixtape/host put at GuestHome; pick a different path if you need
+	// those defaults to coexist.
+	Dotfiles *DotfilesConfig `toml:"dotfiles"`
 }
 
 // ResourcesConfig describes the VM resource allocation.
@@ -89,6 +97,35 @@ type SharedMount struct {
 	Host     string `toml:"host"`
 	Guest    string `toml:"guest"`
 	ReadOnly bool   `toml:"readonly"`
+
+	// Reflink, when true, materializes a copy-on-write snapshot of Host
+	// into the VM's staging directory at prepare time and rewrites Host
+	// to point at the snapshot before the bind mount is set up. Writes
+	// inside the guest land on the snapshot — necessary when Host is a
+	// live workspace and the agent might `rm -rf` it.
+	//
+	// Backed by reflink/clonefile where supported (Linux: FICLONE via
+	// `cp --reflink=auto`; macOS: clonefile via `cp -c`). Falls back to
+	// a byte copy on filesystems without CoW support.
+	Reflink bool `toml:"reflink"`
+}
+
+// DotfilesConfig describes a bundle of host-side dotfiles to surface
+// inside the guest's user home as a single CoW-staged bind mount.
+type DotfilesConfig struct {
+	// GuestHome is the absolute path inside the guest to mount the
+	// bundle at, typically the agent user's home (e.g. "/home/admin").
+	GuestHome string `toml:"guest_home"`
+
+	// Paths is the list of host paths to include. Each path may be
+	// absolute, ~-prefixed (relative to host $HOME), or contain
+	// ${VAR} env references. Paths under $HOME preserve their
+	// position (~/.claude -> <guest_home>/.claude); paths outside
+	// $HOME use just their basename.
+	//
+	// Missing paths are skipped (warn, not error) so an absent
+	// ~/.aws etc. doesn't block boot.
+	Paths []string `toml:"paths"`
 }
 
 // AgentConfig defines what agent harness to run and how agentd manages it.
@@ -239,6 +276,13 @@ func expandPaths(cfg *JcardConfig, baseDir string) {
 	// Expand shared mount host paths
 	for i := range cfg.Shared {
 		cfg.Shared[i].Host = expandPath(cfg.Shared[i].Host, baseDir)
+	}
+
+	// Expand dotfile paths (GuestHome stays as-is — in-guest path).
+	if cfg.Dotfiles != nil {
+		for i := range cfg.Dotfiles.Paths {
+			cfg.Dotfiles.Paths[i] = expandPath(cfg.Dotfiles.Paths[i], baseDir)
+		}
 	}
 
 	// Expand prompt_file relative to jcard.toml
