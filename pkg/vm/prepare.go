@@ -80,6 +80,14 @@ func PrepareQEMUDisk(baseDir string, inst *Instance, platform *QEMUPlatformConfi
 		return fmt.Errorf("staging reflink mounts: %w", err)
 	}
 
+	// Bundle dotfiles (if any) into a single CoW snapshot and append a
+	// synthetic shared mount. Runs after StageReflinks so the appended
+	// entry isn't itself re-staged on next invocation.
+	if err := StageDotfiles(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging dotfiles: %w", err)
+	}
+
 	// Save jcard.toml into the VM directory
 	if err := saveJcard(vmDir, cfg); err != nil {
 		_ = os.RemoveAll(vmDir)

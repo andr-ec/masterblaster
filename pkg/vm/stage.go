@@ -62,6 +62,86 @@ func StageReflinks(vmDir string, cfg *config.JcardConfig) error {
 	return nil
 }
 
+// StageDotfiles, when cfg.Dotfiles is set, gathers every listed host
+// path into a single CoW bundle under <vmDir>/staging/dotfiles/, and
+// appends a synthetic SharedMount that surfaces the bundle at the
+// configured GuestHome.
+//
+// Layout of the bundle: paths originally under $HOME keep their
+// relative position (~/.claude -> staging/dotfiles/.claude); paths
+// outside $HOME use their basename. Missing source paths are skipped
+// with a stderr warning so an absent dotfile (e.g. no ~/.aws) doesn't
+// block boot.
+//
+// Idempotent: the synthetic SharedMount records its staging path, so
+// re-runs on an already-prepared VM dir detect the existing bundle
+// and no-op. Resilient to schema-changes-then-restart but NOT
+// resilient to "add a path then `down`/`up`": you'll need to
+// `mb destroy` to pick up dotfile-list edits.
+func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
+	if cfg.Dotfiles == nil || len(cfg.Dotfiles.Paths) == 0 {
+		return nil
+	}
+	if cfg.Dotfiles.GuestHome == "" {
+		return fmt.Errorf("dotfiles.guest_home must be set when dotfiles.paths is non-empty")
+	}
+
+	bundleDir := filepath.Join(vmDir, "staging", "dotfiles")
+
+	// Idempotency: if a previous prepare already appended the synthetic
+	// mount, skip.
+	for _, m := range cfg.Shared {
+		if m.Host == bundleDir {
+			return nil
+		}
+	}
+
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		return fmt.Errorf("dotfiles: mkdir staging: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("dotfiles: resolving host $HOME: %w", err)
+	}
+
+	for _, p := range cfg.Dotfiles.Paths {
+		if _, err := os.Lstat(p); err != nil {
+			if os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "dotfiles: skipping %q (not found)\n", p)
+				continue
+			}
+			return fmt.Errorf("dotfiles: lstat %q: %w", p, err)
+		}
+
+		// Compute the path's position inside the bundle.
+		var rel string
+		if strings.HasPrefix(p, home+string(filepath.Separator)) {
+			rel = strings.TrimPrefix(p, home+string(filepath.Separator))
+		} else {
+			rel = filepath.Base(p)
+		}
+		dst := filepath.Join(bundleDir, rel)
+
+		// Create parent directories so cp doesn't fail on nested
+		// paths like .config/gh.
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return fmt.Errorf("dotfiles: mkdir parent for %q: %w", rel, err)
+		}
+		if err := cloneTree(p, dst); err != nil {
+			return fmt.Errorf("dotfiles: clone %q -> %q: %w", p, dst, err)
+		}
+	}
+
+	// Emit the synthetic mount. Reflink=false because we've already
+	// reflink-staged the contents into bundleDir.
+	cfg.Shared = append(cfg.Shared, config.SharedMount{
+		Host:  bundleDir,
+		Guest: cfg.Dotfiles.GuestHome,
+	})
+	return nil
+}
+
 // cloneTree recursively copies src to dst using reflink/clonefile where
 // the filesystem supports it. Shelled out to coreutils `cp` rather than
 // reimplemented in Go: handling directories, symlinks, sparse files and

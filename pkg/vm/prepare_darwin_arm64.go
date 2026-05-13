@@ -101,6 +101,12 @@ func PrepareAppleVirtDisk(baseDir string, inst *Instance) error {
 		return fmt.Errorf("staging reflink mounts: %w", err)
 	}
 
+	// Bundle dotfiles into a single CoW snapshot. See prepare.go.
+	if err := StageDotfiles(vmDir, cfg); err != nil {
+		_ = os.RemoveAll(vmDir)
+		return fmt.Errorf("staging dotfiles: %w", err)
+	}
+
 	// Save jcard.toml
 	if err := saveJcard(vmDir, cfg); err != nil {
 		_ = os.RemoveAll(vmDir)
