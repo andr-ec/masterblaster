@@ -128,6 +128,22 @@ func StageDotfiles(vmDir string, cfg *config.JcardConfig) error {
 				return fmt.Errorf("dotfiles: clone home-manager %q: %w", e.Name(), err)
 			}
 		}
+		// cp -a preserves the nix-store mode 555 on the reflinked tree,
+		// which means later user-path overlays can't RemoveAll their
+		// target (parent dirs lack the write bit). Force writable for
+		// the owner; symlinks are left alone (chmod on a symlink either
+		// targets the link's target — not what we want — or fails).
+		if err := filepath.Walk(bundleDir, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return nil
+			}
+			return os.Chmod(p, info.Mode()|0o200)
+		}); err != nil {
+			return fmt.Errorf("dotfiles: chmod bundle writable: %w", err)
+		}
 	}
 
 	home, err := os.UserHomeDir()
