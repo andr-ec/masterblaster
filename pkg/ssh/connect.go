@@ -45,12 +45,17 @@ func ExecSSH(user, host string, port int, identityFile, workdir string) error {
 	args = append(args, fmt.Sprintf("%s@%s", user, host))
 
 	// Land in the configured workdir, then exec a login shell. `cd`
-	// is silent-failing so a missing workdir doesn't leave the user
-	// at a broken shell; ${SHELL:-/bin/bash} preserves whatever
-	// /etc/passwd has set as the user's login shell.
+	// is silent-failing so a missing workdir doesn't leave the user at
+	// a broken shell. Prefer zsh because the stereOS home-manager
+	// generates a .zshrc with direnv / zoxide / completion hooks, but
+	// the agent user's /etc/passwd shell is bash-based (agent-ns-shell)
+	// and `.bashrc` doesn't exist — so plain `$SHELL` skips all the
+	// nice ergonomics. Fall back to bash if zsh isn't on PATH.
 	if workdir != "" {
 		args = append(args, fmt.Sprintf(
-			"cd %s 2>/dev/null; exec ${SHELL:-/bin/bash} -l",
+			"cd %s 2>/dev/null; "+
+				"if command -v zsh >/dev/null 2>&1; then exec zsh -l; "+
+				"else exec ${SHELL:-/bin/bash} -l; fi",
 			shellQuote(workdir),
 		))
 	}
