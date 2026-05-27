@@ -397,15 +397,17 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		}
 	}
 
-	// Inject SSH key for the admin user only. Injecting for `agent` runs
-	// `chmod /home/agent/.ssh` inside stereosd which fails when that path
-	// is bindfs-mounted read-only (e.g. shared from host `~/.ssh`), and
-	// `mb ssh` defaults to admin anyway. Per-sandbox SSH for the agent
-	// user belongs with the per-sandbox-user work (sb-<name>), not the
-	// single-`agent`-user world.
+	// Inject SSH key for admin (required — mb ssh defaults to admin) and
+	// best-effort for agent (so `mb ssh -u agent` works). The agent inject
+	// can fail when /home/agent/.ssh is bindfs-mounted read-only (e.g. a
+	// dotfiles bundle shares ~/.ssh from host); in that case the user is
+	// expected to land via admin and hop. Don't fail provision over it.
 	if inst.sshPublicKey != "" {
 		if err := client.InjectSSHKey(ctx, "admin", inst.sshPublicKey); err != nil {
 			return fmt.Errorf("injecting SSH key for admin: %w", err)
+		}
+		if err := client.InjectSSHKey(ctx, "agent", inst.sshPublicKey); err != nil {
+			fmt.Fprintf(os.Stderr, "provision: inject SSH key for agent: %v (use `mb ssh` and hop)\n", err)
 		}
 	}
 
