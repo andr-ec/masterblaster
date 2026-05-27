@@ -692,6 +692,10 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 	// Pull workdir from the saved jcard so `mb ssh` can land in the
 	// agent's intended cwd. Falls back to inst.Config if loaded, then
 	// to reading the saved jcard, then empty (= $HOME).
+	//
+	// Also rewrite /home/agent paths to the per-sandbox /home/sb-<name>
+	// so `mb ssh` cd's into the right place. mb up does the same
+	// rewrite at provision time; this mirrors it for `mb ssh` consumers.
 	switch {
 	case inst.Config != nil:
 		info.Workdir = inst.Config.Agent.Workdir
@@ -700,6 +704,14 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 			info.Workdir = cfg.Agent.Workdir
 		}
 	}
+	const oldHome = "/home/agent"
+	if info.Workdir == oldHome || strings.HasPrefix(info.Workdir, oldHome+"/") {
+		info.Workdir = "/home/sb-" + inst.Name + info.Workdir[len(oldHome):]
+	}
+
+	// User is sb-<name> — the per-sandbox user mb up provisions for the
+	// harness. `mb ssh` uses this as the default --user.
+	info.User = "sb-" + inst.Name
 
 	return info
 }

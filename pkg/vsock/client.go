@@ -180,6 +180,36 @@ func (c *Client) InjectSSHKey(ctx context.Context, user, publicKey string) error
 	return checkAck(resp, MsgInjectSSHKey)
 }
 
+// CreateSandboxUser asks stereosd to provision a per-sandbox sb-<name>
+// user with its own UID, home, and login-shell wrapper. Idempotent:
+// re-creating an existing user is a no-op on stereosd's side.
+func (c *Client) CreateSandboxUser(ctx context.Context, name string) error {
+	env, err := NewEnvelope(MsgCreateSandboxUser, &SandboxUserPayload{Name: name})
+	if err != nil {
+		return err
+	}
+	resp, err := c.send(ctx, env)
+	if err != nil {
+		return fmt.Errorf("create sandbox user %q: %w", name, err)
+	}
+	return checkAck(resp, MsgCreateSandboxUser)
+}
+
+// DestroySandboxUser asks stereosd to tear down sb-<name>: kills the
+// user's procs, unmounts under its home, userdel -r, removes the
+// shell wrapper. Idempotent.
+func (c *Client) DestroySandboxUser(ctx context.Context, name string) error {
+	env, err := NewEnvelope(MsgDestroySandboxUser, &SandboxUserPayload{Name: name})
+	if err != nil {
+		return err
+	}
+	resp, err := c.send(ctx, env)
+	if err != nil {
+		return fmt.Errorf("destroy sandbox user %q: %w", name, err)
+	}
+	return checkAck(resp, MsgDestroySandboxUser)
+}
+
 // Mount requests stereosd to mount a shared directory.
 func (c *Client) Mount(ctx context.Context, tag, guestPath, fsType string, readOnly bool) error {
 	env, err := NewEnvelope(MsgMount, &MountPayload{

@@ -225,21 +225,34 @@ func (n *NativeBackend) Destroy(ctx context.Context, inst *Instance) error {
 			cfg = loaded
 		}
 	}
-	if cfg != nil && len(cfg.Shared) > 0 {
-		transport := n.transport()
-		if client, err := vsock.Connect(transport, 5*time.Second); err == nil {
-			defer func() { _ = client.Close() }()
+	transport := n.transport()
+	if client, err := vsock.Connect(transport, 5*time.Second); err == nil {
+		defer func() { _ = client.Close() }()
+
+		// Unmount every share, rewriting guest paths to the per-sandbox
+		// home in case the on-disk jcard still has the historical
+		// /home/agent path. Best-effort: a leftover mount is recoverable.
+		if cfg != nil {
 			for _, shared := range cfg.Shared {
-				if err := client.Unmount(ctx, shared.Guest); err != nil {
-					// Don't fail the whole destroy — log and continue.
-					// A leftover mount is recoverable; a half-destroyed
-					// instance directory is not.
-					fmt.Fprintf(os.Stderr, "destroy: unmount %s: %v\n", shared.Guest, err)
+				guest := shared.Guest
+				const oldHome = "/home/agent"
+				if guest == oldHome || strings.HasPrefix(guest, oldHome+"/") {
+					guest = "/home/sb-" + inst.Name + guest[len(oldHome):]
+				}
+				if err := client.Unmount(ctx, guest); err != nil {
+					fmt.Fprintf(os.Stderr, "destroy: unmount %s: %v\n", guest, err)
 				}
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "destroy: cannot connect to stereosd for unmount: %v\n", err)
 		}
+
+		// Destroy the per-sandbox user (sb-<name>): kills procs,
+		// lazy-umounts under /home/sb-<name>, userdel -r, removes the
+		// login-shell wrapper. Idempotent on stereosd's side.
+		if err := client.DestroySandboxUser(ctx, inst.Name); err != nil {
+			fmt.Fprintf(os.Stderr, "destroy: drop sandbox user %s: %v\n", inst.Name, err)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "destroy: cannot connect to stereosd: %v\n", err)
 	}
 
 	if err := os.RemoveAll(inst.Dir); err != nil {
@@ -362,6 +375,17 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		return fmt.Errorf("waiting for stereosd ready: %w", err)
 	}
 
+	// Provision the per-sandbox user (sb-<name>) before anything that
+	// references the user. Idempotent on stereosd's side, so re-running
+	// provision (e.g. mb down → mb up) doesn't churn the user. After
+	// this returns, /home/sb-<inst.Name> and the login-shell wrapper
+	// exist; rewrite jcard paths to land in that home instead of the
+	// historical /home/agent shared dir.
+	if err := client.CreateSandboxUser(ctx, inst.Name); err != nil {
+		return fmt.Errorf("creating sandbox user: %w", err)
+	}
+	rewriteAgentHomeToSandbox(cfg, inst.Name)
+
 	// Send config to stereosd. agentd reads the result via its own config
 	// package (papercomputeco/agentd) which expects the `[[agents]]`
 	// schema — use MarshalForAgentd, NOT the round-trippable Marshal we
@@ -397,14 +421,17 @@ func (n *NativeBackend) provision(ctx context.Context, inst *Instance, cfg *conf
 		}
 	}
 
-	// Inject SSH key for admin (required — mb ssh defaults to admin) and
-	// best-effort for agent (so `mb ssh -u agent` works). The agent inject
-	// can fail when /home/agent/.ssh is bindfs-mounted read-only (e.g. a
-	// dotfiles bundle shares ~/.ssh from host); in that case the user is
-	// expected to land via admin and hop. Don't fail provision over it.
+	// Inject SSH key for admin (operator account) and the per-sandbox
+	// sb-<name> user (where the harness runs). Best-effort for the
+	// legacy agent user to keep `mb ssh -u agent` working for sandboxes
+	// that haven't migrated yet.
 	if inst.sshPublicKey != "" {
 		if err := client.InjectSSHKey(ctx, "admin", inst.sshPublicKey); err != nil {
 			return fmt.Errorf("injecting SSH key for admin: %w", err)
+		}
+		sbUser := "sb-" + inst.Name
+		if err := client.InjectSSHKey(ctx, sbUser, inst.sshPublicKey); err != nil {
+			return fmt.Errorf("injecting SSH key for %s: %w", sbUser, err)
 		}
 		if err := client.InjectSSHKey(ctx, "agent", inst.sshPublicKey); err != nil {
 			fmt.Fprintf(os.Stderr, "provision: inject SSH key for agent: %v (use `mb ssh` and hop)\n", err)
@@ -465,6 +492,27 @@ func ensureCloneStaging(instDir string, shared config.SharedMount) (string, erro
 func cloneStagingPath(instDir, guest string) string {
 	sum := sha256.Sum256([]byte(guest))
 	return filepath.Join(instDir, "shared", hex.EncodeToString(sum[:8]))
+}
+
+// rewriteAgentHomeToSandbox rewrites every /home/agent reference in cfg
+// (shared mount guest paths, agent workdir) to the per-sandbox home
+// /home/sb-<name>. Lets users keep writing the historical /home/agent
+// paths in jcard.toml while sandboxes provision under sb-<name>.
+//
+// Idempotent: paths already under /home/sb-<name> are left alone.
+func rewriteAgentHomeToSandbox(cfg *config.JcardConfig, sandboxName string) {
+	const oldHome = "/home/agent"
+	newHome := "/home/sb-" + sandboxName
+	rewrite := func(p string) string {
+		if p == oldHome || strings.HasPrefix(p, oldHome+"/") {
+			return newHome + p[len(oldHome):]
+		}
+		return p
+	}
+	for i := range cfg.Shared {
+		cfg.Shared[i].Guest = rewrite(cfg.Shared[i].Guest)
+	}
+	cfg.Agent.Workdir = rewrite(cfg.Agent.Workdir)
 }
 
 // PrepareNativeDir creates the instance directory for a native backend

@@ -57,4 +57,9 @@ type SandboxInfo struct {
 	// `mb ssh` to land interactive shells in the same dir the agent
 	// would; empty means the user's $HOME (sshd default).
 	Workdir string `json:"workdir,omitempty"`
+
+	// User is the in-sandbox user the harness runs as. With per-sandbox
+	// user isolation, this is `sb-<name>`; for legacy sandboxes it's
+	// "agent". Used by `mb ssh` as the default --user.
+	User string `json:"user,omitempty"`
 }

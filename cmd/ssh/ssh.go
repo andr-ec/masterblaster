@@ -36,21 +36,24 @@ func NewSSHCmd(configDirFn func() string, verboseFn func() bool) *cobra.Command 
 		Short: sshShortDesc,
 		Long:  sshLongDesc,
 		Args:  cobra.MaximumNArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(c *cobra.Command, args []string) error {
 			name := ""
 			if len(args) > 0 {
 				name = args[0]
 			}
-			return runSSH(configDirFn(), name, user, verboseFn())
+			userExplicit := c.Flags().Changed("user")
+			return runSSH(configDirFn(), name, user, userExplicit, verboseFn())
 		},
 	}
 
-	cmd.Flags().StringVarP(&user, "user", "u", "agent", "SSH user (default: agent)")
+	// Sentinel default. If the user doesn't pass --user, runSSH picks
+	// the sandbox's own User field (sb-<name>) at runtime.
+	cmd.Flags().StringVarP(&user, "user", "u", "", "SSH user (default: sandbox's sb-<name>)")
 
 	return cmd
 }
 
-func runSSH(baseDir, name, user string, verbose bool) error {
+func runSSH(baseDir, name, user string, userExplicit, verbose bool) error {
 	if err := client.EnsureDaemon(baseDir); err != nil {
 		return err
 	}
@@ -68,6 +71,18 @@ func runSSH(baseDir, name, user string, verbose bool) error {
 	sb := resp.Sandboxes[0]
 	if sb.State != "running" {
 		return fmt.Errorf("sandbox %q is not running (state: %s)", sb.Name, sb.State)
+	}
+
+	// If the caller didn't pass --user, default to the sandbox's own
+	// User (sb-<name>). Fall back to "agent" for old sandboxes that
+	// haven't been re-provisioned since the sb-<name> rollout.
+	if !userExplicit {
+		switch {
+		case sb.User != "":
+			user = sb.User
+		default:
+			user = "agent"
+		}
 	}
 
 	if verbose {

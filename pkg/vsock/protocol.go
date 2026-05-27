@@ -20,9 +20,11 @@ const (
 	MsgShutdown       MessageType = "shutdown"
 	MsgGetHealth      MessageType = "get_health"
 	MsgSetConfig      MessageType = "set_config"
-	MsgInjectSSHKey   MessageType = "inject_ssh_key"
-	MsgStopAgent      MessageType = "stop_agent"
-	MsgForceStopAgent MessageType = "force_stop_agent"
+	MsgInjectSSHKey       MessageType = "inject_ssh_key"
+	MsgCreateSandboxUser  MessageType = "create_sandbox_user"
+	MsgDestroySandboxUser MessageType = "destroy_sandbox_user"
+	MsgStopAgent          MessageType = "stop_agent"
+	MsgForceStopAgent     MessageType = "force_stop_agent"
 
 	// Guest -> Host messages
 	MsgPong      MessageType = "pong"
@@ -143,4 +145,11 @@ type SSHKeyPayload struct {
 	// PublicKey is the SSH public key in authorized_keys format
 	// (e.g. "ssh-ed25519 AAAA... comment").
 	PublicKey string `json:"public_key"`
+}
+
+// SandboxUserPayload is the payload for create_sandbox_user /
+// destroy_sandbox_user. Name is the sandbox identifier; stereosd
+// derives the username as sb-<name>.
+type SandboxUserPayload struct {
+	Name string `json:"name"`
 }
