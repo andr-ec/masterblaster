@@ -19,6 +19,7 @@ import (
 	"github.com/papercomputeco/masterblaster/pkg/config"
 	"github.com/papercomputeco/masterblaster/pkg/vm"
 	"github.com/papercomputeco/masterblaster/pkg/vmhost"
+	"github.com/papercomputeco/masterblaster/pkg/vsock"
 )
 
 // managedVM holds the daemon's per-VM state including the vmhost client
@@ -539,6 +540,16 @@ func (d *Daemon) handleDestroy(ctx context.Context, req *Request) Response {
 		}
 	}
 
+	// Native backend cleanup: unmount the bindfs shares stereosd set up
+	// at /home/sb-<name>/... and tear down the per-sandbox sb-<name>
+	// user. Best-effort — a stereosd that's down or doesn't speak the
+	// new RPCs (older deployments) shouldn't block destroy. QEMU /
+	// applevirt backends shut down the whole VM, so no host-side
+	// cleanup is needed for them.
+	if mvm.backend == "native" {
+		destroyNativeRuntime(ctx, mvm.inst)
+	}
+
 	// Remove VM directory
 	if mvm.inst.Dir != "" {
 		if err := os.RemoveAll(mvm.inst.Dir); err != nil {
@@ -714,6 +725,48 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 	info.User = "sb-" + inst.Name
 
 	return info
+}
+
+// destroyNativeRuntime tears down host-side state stereosd set up for a
+// native sandbox: bindfs mounts at /home/sb-<name>/... and the
+// per-sandbox sb-<name> user (which in turn lazy-umounts under its home
+// and SIGKILLs any procs still owned by it).
+//
+// Best-effort throughout — a stereosd that's down, lacks the new RPCs,
+// or fails partway must not block destroy. Errors are logged to the
+// daemon log; the caller continues to RemoveAll the instance dir.
+func destroyNativeRuntime(ctx context.Context, inst *vm.Instance) {
+	transport := &vsock.TCPTransport{Host: "127.0.0.1", Port: 1024}
+	client, err := vsock.Connect(transport, 5*time.Second)
+	if err != nil {
+		log.Printf("destroy %s: cannot reach stereosd for runtime cleanup: %v", inst.Name, err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	// Unmount each share the user declared, rewriting /home/agent paths
+	// to the per-sandbox home so we hit the bindfs mb up actually
+	// created. The on-disk jcard still holds the user-facing path.
+	if cfg, err := config.Load(inst.JcardPath()); err == nil {
+		const oldHome = "/home/agent"
+		newHome := "/home/sb-" + inst.Name
+		for _, shared := range cfg.Shared {
+			guest := shared.Guest
+			if guest == oldHome || strings.HasPrefix(guest, oldHome+"/") {
+				guest = newHome + guest[len(oldHome):]
+			}
+			if err := client.Unmount(ctx, guest); err != nil {
+				log.Printf("destroy %s: unmount %s: %v", inst.Name, guest, err)
+			}
+		}
+	}
+
+	// Tear down sb-<name>: stereosd's UserManager kills user procs,
+	// lazy-umounts under /home/sb-<name>, userdel -r, removes the
+	// shell wrapper. Idempotent on stereosd's side.
+	if err := client.DestroySandboxUser(ctx, inst.Name); err != nil {
+		log.Printf("destroy %s: drop sandbox user: %v", inst.Name, err)
+	}
 }
 
 // resolveBackend determines the backend type for a VM. Precedence:
