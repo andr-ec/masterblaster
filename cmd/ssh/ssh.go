@@ -16,12 +16,13 @@ const sshLongDesc string = `Connect to a running sandbox via SSH. Replaces the c
 with the ssh binary for a clean interactive experience.
 
 If no name is given and only one sandbox is running, connects to that one.
-The default user is "admin" (the operator account in StereOS).
+The default user is "agent" (where the harness runs). Use --user admin
+for the operator account in StereOS.
 
 Examples:
   mb ssh
   mb ssh my-sandbox
-  mb ssh --user agent my-sandbox`
+  mb ssh --user admin my-sandbox`
 
 const sshShortDesc string = "SSH into a running sandbox"
 
@@ -44,7 +45,7 @@ func NewSSHCmd(configDirFn func() string, verboseFn func() bool) *cobra.Command 
 		},
 	}
 
-	cmd.Flags().StringVarP(&user, "user", "u", "admin", "SSH user (default: admin)")
+	cmd.Flags().StringVarP(&user, "user", "u", "agent", "SSH user (default: agent)")
 
 	return cmd
 }
