@@ -97,6 +97,13 @@ func runUp(baseDir, cfgPath string) error {
 		if user == "" {
 			user = "admin"
 		}
+		// Container backends get a routable bridge IP. Surface it up front so
+		// a dev can reach a service inside the sandbox (e.g. a dev server at
+		// http://<ip>:<port>) from the tailnet, where the host advertises the
+		// sandbox subnet as a route. qemu/native stay on 127.0.0.1 and skip this.
+		if host != "127.0.0.1" {
+			ui.Info("IP: %s  (reachable on the tailnet)", host)
+		}
 		if sb.SSHKeyPath != "" {
 			short := shortenHome(sb.SSHKeyPath)
 			ui.Info("ssh -p %d -i %s %s@%s", sb.SSHPort, short, user, host)
