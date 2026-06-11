@@ -85,9 +85,17 @@ func runSSH(baseDir, name, user string, userExplicit, verbose bool) error {
 		}
 	}
 
-	if verbose {
-		ui.Info("Connecting to %s@127.0.0.1:%d", user, sb.SSHPort)
+	// Container backends report their bridge IP in SSHHost; qemu/native
+	// report 127.0.0.1 with a forwarded SSHPort. Fall back to loopback
+	// for older daemons that don't send SSHHost.
+	host := sb.SSHHost
+	if host == "" {
+		host = "127.0.0.1"
 	}
 
-	return ssh.ExecSSH(user, "127.0.0.1", sb.SSHPort, sb.SSHKeyPath, sb.Workdir)
+	if verbose {
+		ui.Info("Connecting to %s@%s:%d", user, host, sb.SSHPort)
+	}
+
+	return ssh.ExecSSH(user, host, sb.SSHPort, sb.SSHKeyPath, sb.Workdir)
 }

@@ -86,11 +86,22 @@ func runUp(baseDir, cfgPath string) error {
 		fmt.Fprintln(os.Stderr)
 		ui.Success("Sandbox %q launched", sb.Name)
 		fmt.Fprintln(os.Stderr)
+		// Container backends (nspawn/incus/podman) report a bridge IP +
+		// login user via SSHHost/User; qemu/native report the loopback
+		// forward. Build the example line from whatever the daemon sent.
+		host := sb.SSHHost
+		if host == "" {
+			host = "127.0.0.1"
+		}
+		user := sb.User
+		if user == "" {
+			user = "admin"
+		}
 		if sb.SSHKeyPath != "" {
 			short := shortenHome(sb.SSHKeyPath)
-			ui.Info("ssh -p %d -i %s admin@127.0.0.1", sb.SSHPort, short)
+			ui.Info("ssh -p %d -i %s %s@%s", sb.SSHPort, short, user, host)
 		} else {
-			ui.Info("ssh -p %d admin@127.0.0.1", sb.SSHPort)
+			ui.Info("ssh -p %d %s@%s", sb.SSHPort, user, host)
 		}
 		ui.Info("mb ssh %s", sb.Name)
 	}

@@ -1,2 +1,5 @@
 .direnv/
 /build/
+
+# local dev build artifact
+/mb

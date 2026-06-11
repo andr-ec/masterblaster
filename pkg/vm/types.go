@@ -39,6 +39,12 @@ type Instance struct {
 	// SSHPort is the host port forwarded to guest port 22.
 	SSHPort int `json:"ssh_port"`
 
+	// IPAddr is the sandbox's IP address on the host bridge, for backends
+	// that give each sandbox its own network namespace (nspawn, incus,
+	// podman). Empty for backends reached via a forwarded localhost port
+	// (qemu). When set, `mb ssh` connects to <IPAddr>:22.
+	IPAddr string `json:"ip_addr,omitempty"`
+
 	// VMState is the current lifecycle state.
 	VMState State `json:"state"`
 

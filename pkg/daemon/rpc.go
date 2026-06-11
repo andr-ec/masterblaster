@@ -49,6 +49,12 @@ type SandboxInfo struct {
 	Memory      string `json:"memory"`
 	SSHPort     int    `json:"ssh_port"`
 	SSHAddress  string `json:"ssh_address"`
+
+	// SSHHost is the host `mb ssh` should dial. For port-forwarded
+	// backends (qemu) it's "127.0.0.1" and SSHPort is the forwarded
+	// port. For container backends (nspawn/incus/podman) it's the
+	// sandbox's bridge IP and SSHPort is 22.
+	SSHHost string `json:"ssh_host,omitempty"`
 	SSHKeyPath  string `json:"ssh_key_path,omitempty"`
 	VsockPort   int    `json:"vsock_port"`
 	NetworkMode string `json:"network_mode"`

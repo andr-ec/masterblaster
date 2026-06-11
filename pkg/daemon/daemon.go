@@ -369,6 +369,8 @@ func (d *Daemon) prepareDisk(inst *vm.Instance, cfg *config.JcardConfig, backend
 		return vm.PrepareAppleVirtDisk(d.baseDir, inst)
 	case "native":
 		return vm.PrepareNativeDir(d.baseDir, inst)
+	case "nspawn":
+		return vm.PrepareNspawnDir(d.baseDir, inst)
 	default:
 		return fmt.Errorf("unknown backend: %s", backend)
 	}
@@ -546,8 +548,14 @@ func (d *Daemon) handleDestroy(ctx context.Context, req *Request) Response {
 	// new RPCs (older deployments) shouldn't block destroy. QEMU /
 	// applevirt backends shut down the whole VM, so no host-side
 	// cleanup is needed for them.
-	if mvm.backend == "native" {
+	switch mvm.backend {
+	case "native":
 		destroyNativeRuntime(ctx, mvm.inst)
+	case "nspawn":
+		// The nspawn rootfs holds root-owned files (host keys, container
+		// writes), so stop the unit and sudo-remove the dir; the generic
+		// RemoveAll below is then a no-op.
+		destroyNspawnRuntime(mvm.inst)
 	}
 
 	// Remove VM directory
@@ -684,9 +692,18 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 		Name:       inst.Name,
 		State:      string(inst.VMState),
 		SSHPort:    inst.SSHPort,
+		SSHHost:    "127.0.0.1",
 		SSHAddress: fmt.Sprintf("127.0.0.1:%d", inst.SSHPort),
 		SSHKeyPath: inst.SSHKeyPath,
 		VsockPort:  inst.VsockPort,
+	}
+
+	// Container backends reach SSH directly at the sandbox's bridge IP
+	// on port 22 (no host port-forward). qemu/native leave IPAddr empty
+	// and keep the 127.0.0.1:<forwarded-port> form above.
+	if inst.IPAddr != "" {
+		info.SSHHost = inst.IPAddr
+		info.SSHAddress = fmt.Sprintf("%s:%d", inst.IPAddr, inst.SSHPort)
 	}
 
 	// Try loading state for extra info
@@ -721,8 +738,14 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 	}
 
 	// User is sb-<name> — the per-sandbox user mb up provisions for the
-	// harness. `mb ssh` uses this as the default --user.
-	info.User = "sb-" + inst.Name
+	// harness. `mb ssh` uses this as the default --user. Container
+	// backends inject the key into /root/.ssh and have no sb-<name>
+	// user yet, so they log in as root.
+	if inst.IPAddr != "" {
+		info.User = "root"
+	} else {
+		info.User = "sb-" + inst.Name
+	}
 
 	return info
 }
@@ -766,6 +789,20 @@ func destroyNativeRuntime(ctx context.Context, inst *vm.Instance) {
 	// shell wrapper. Idempotent on stereosd's side.
 	if err := client.DestroySandboxUser(ctx, inst.Name); err != nil {
 		log.Printf("destroy %s: drop sandbox user: %v", inst.Name, err)
+	}
+}
+
+// destroyNspawnRuntime stops the transient nspawn unit and removes its
+// (root-owned) rootfs. Best-effort: errors are logged, not fatal.
+func destroyNspawnRuntime(inst *vm.Instance) {
+	machine := "mb-" + inst.Name
+	_ = exec.Command("sudo", "machinectl", "terminate", machine).Run()
+	_ = exec.Command("sudo", "systemctl", "stop", machine).Run()
+	_ = exec.Command("sudo", "systemctl", "reset-failed", machine).Run()
+	if inst.Dir != "" {
+		if out, err := exec.Command("sudo", "rm", "-rf", inst.Dir).CombinedOutput(); err != nil {
+			log.Printf("destroy %s: sudo rm -rf %s: %v: %s", inst.Name, inst.Dir, err, strings.TrimSpace(string(out)))
+		}
 	}
 }
 

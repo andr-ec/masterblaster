@@ -21,6 +21,9 @@ type StateFile struct {
 	VsockPort   int       `json:"vsock_port"`
 	ConfigPath  string    `json:"config_path,omitempty"`
 
+	// IPAddr is the sandbox's IP on the host bridge (nspawn/incus/podman).
+	IPAddr string `json:"ip_addr,omitempty"`
+
 	// SSHKeyPath is the path to the ephemeral SSH private key, relative
 	// to the VM directory or absolute. Persisted so the key survives
 	// daemon restarts.
