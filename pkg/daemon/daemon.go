@@ -698,13 +698,10 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 		VsockPort:  inst.VsockPort,
 	}
 
-	// Container backends reach SSH directly at the sandbox's bridge IP
-	// on port 22 (no host port-forward). qemu/native leave IPAddr empty
-	// and keep the 127.0.0.1:<forwarded-port> form above.
-	if inst.IPAddr != "" {
-		info.SSHHost = inst.IPAddr
-		info.SSHAddress = fmt.Sprintf("%s:%d", inst.IPAddr, inst.SSHPort)
-	}
+	// Resolve the sandbox IP. The daemon's in-memory inst may not carry
+	// it (container backends assign it in the vmhost process), so fall
+	// back to the persisted state below.
+	ipAddr := inst.IPAddr
 
 	// Try loading state for extra info
 	if state, err := inst.LoadState(); err == nil {
@@ -715,6 +712,17 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 		if info.SSHKeyPath == "" {
 			info.SSHKeyPath = state.SSHKeyPath
 		}
+		if ipAddr == "" {
+			ipAddr = state.IPAddr
+		}
+	}
+
+	// Container backends reach SSH directly at the sandbox's bridge IP
+	// on port 22 (no host port-forward). qemu/native leave IPAddr empty
+	// and keep the 127.0.0.1:<forwarded-port> form set above.
+	if ipAddr != "" {
+		info.SSHHost = ipAddr
+		info.SSHAddress = fmt.Sprintf("%s:%d", ipAddr, inst.SSHPort)
 	}
 
 	// Pull workdir from the saved jcard so `mb ssh` can land in the
@@ -741,7 +749,7 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 	// harness. `mb ssh` uses this as the default --user. Container
 	// backends inject the key into /root/.ssh and have no sb-<name>
 	// user yet, so they log in as root.
-	if inst.IPAddr != "" {
+	if ipAddr != "" {
 		info.User = "root"
 	} else {
 		info.User = "sb-" + inst.Name

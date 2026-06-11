@@ -292,6 +292,23 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		return "", fmt.Errorf("symlink /bin/sh: %w", err)
 	}
 
+	// Shared PATH + cert env so SSH sessions (interactive and
+	// `ssh host cmd`) have coreutils/nix on PATH and trust the host CA.
+	pathDirs, err := n.containerPathDirs()
+	if err != nil {
+		return "", err
+	}
+	pathStr := strings.Join(pathDirs, ":")
+	caBundle := resolveCABundle()
+	sessionEnv := fmt.Sprintf("PATH=%s NIX_REMOTE=daemon", pathStr)
+	if caBundle != "" {
+		sessionEnv += fmt.Sprintf(" SSL_CERT_FILE=%s NIX_SSL_CERT_FILE=%s", caBundle, caBundle)
+	}
+	profile := fmt.Sprintf("export PATH=%s\nexport NIX_REMOTE=daemon\n", pathStr)
+	if caBundle != "" {
+		profile += fmt.Sprintf("export SSL_CERT_FILE=%s\nexport NIX_SSL_CERT_FILE=%s\n", caBundle, caBundle)
+	}
+
 	machine := nspawnMachine(inst.Name)
 	files := map[string]string{
 		// root plus the privilege-separation user modern OpenSSH requires
@@ -305,7 +322,11 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		// Minimal sshd config: key-only root login. Host keys are generated
 		// by `ssh-keygen -A` in init.sh; AuthorizedKeysFile defaults to
 		// /root/.ssh/authorized_keys (where buildRoot injects the pubkey).
-		"etc/ssh/sshd_config": "Port 22\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\n",
+		"etc/ssh/sshd_config": "Port 22\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nSetEnv " + sessionEnv + "\n",
+		// Sourced by interactive login shells (`mb ssh`). SetEnv above
+		// covers non-interactive `ssh host cmd`; this is the belt-and-
+		// suspenders for an interactive shell that resets PATH.
+		"etc/profile": profile,
 	}
 	for rel, content := range files {
 		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0644); err != nil {
@@ -353,21 +374,14 @@ func (n *NspawnBackend) buildInit() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	bash, err := resolveHostBin("bash")
-	if err != nil {
-		return "", err
-	}
 	caBundle := resolveCABundle()
 
 	// PATH built from resolved store bin dirs so a shell inside the sandbox
 	// has coreutils + bash + the nix client without relying on bound /run.
-	pathDirs := dedupeDirs(
-		filepath.Dir(mkdir),
-		filepath.Dir(bash),
-		filepath.Dir(sshd),
-		"/nix/var/nix/profiles/default/bin",
-		"/usr/bin", "/bin",
-	)
+	pathDirs, err := n.containerPathDirs()
+	if err != nil {
+		return "", err
+	}
 
 	return fmt.Sprintf(`#!/bin/sh
 set -e
@@ -390,6 +404,34 @@ chmod 0755 /var/empty 2>/dev/null || true
 %[4]s -A >/dev/null 2>&1 || true
 exec %[3]s -D -e -f /etc/ssh/sshd_config
 `, ipBin, nspawnGateway, sshd, sshKeygen, caBundle, strings.Join(pathDirs, ":"), mkdir), nil
+}
+
+// containerPathDirs returns the PATH directories a shell inside the sandbox
+// needs (coreutils + bash + the ssh/nix client), resolved to live /nix store
+// dirs. Shared by init.sh (the sshd PATH) and the sshd_config SetEnv / profile
+// so an interactive `mb ssh` and a non-interactive `ssh host cmd` see the same
+// PATH. The default nix profile bin is included so devbox-installed tools land
+// on PATH once realized.
+func (n *NspawnBackend) containerPathDirs() ([]string, error) {
+	mkdir, err := resolveHostBin("mkdir")
+	if err != nil {
+		return nil, err
+	}
+	bash, err := resolveHostBin("bash")
+	if err != nil {
+		return nil, err
+	}
+	sshd, err := resolveHostBin("sshd")
+	if err != nil {
+		return nil, err
+	}
+	return dedupeDirs(
+		filepath.Dir(mkdir),
+		filepath.Dir(bash),
+		filepath.Dir(sshd),
+		"/nix/var/nix/profiles/default/bin",
+		"/usr/bin", "/bin",
+	), nil
 }
 
 // dedupeDirs returns the input dirs with duplicates removed, order preserved.
