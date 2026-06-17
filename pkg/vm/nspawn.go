@@ -577,6 +577,22 @@ func PrepareNspawnDir(baseDir string, inst *Instance) error {
 		_ = os.RemoveAll(vmDir)
 		return fmt.Errorf("saving state: %w", err)
 	}
+
+	// Pre-warm clone-mode staging here, daemon-side, BEFORE spawnVMHost's
+	// 120s ready poll. A large workspace (tens of GB / many files) can take
+	// minutes to reflink even on XFS; doing it inside the vmhost boot path
+	// would blow that deadline and the daemon would tear the sandbox down.
+	// ensureCloneStaging is cache-keyed by guest path, so launch() then gets
+	// an instant hit. No timeout applies to prepareDisk.
+	for _, sh := range inst.Config.Shared {
+		if sh.Mode != "clone" {
+			continue
+		}
+		if _, err := ensureCloneStaging(vmDir, sh); err != nil {
+			_ = sudoRemoveAll(vmDir)
+			return fmt.Errorf("pre-warming clone staging for %q: %w", sh.Host, err)
+		}
+	}
 	return nil
 }
 
