@@ -22,15 +22,21 @@ Masterblaster daemon to create, configure, and start the VM.
 If the daemon is not running, it will be automatically started in the
 background.
 
+Use --name to override the jcard's name, which lets you run several
+sandboxes from the SAME jcard/workspace at once: each name gets its own
+instance dir, reflink clone, and bridge IP, so they don't collide.
+
 Examples:
   mb up
-  mb up --config /path/to/jcard.toml`
+  mb up --config /path/to/jcard.toml
+  mb up --name myproj-2          # a second, independent sandbox of this project`
 
 const upShortDesc string = "Create and start a sandbox"
 
 // NewUpCmd creates the up command.
 func NewUpCmd(configDirFn func() string) *cobra.Command {
 	var cfgPath string
+	var name string
 
 	cmd := &cobra.Command{
 		Use:   "up",
@@ -38,16 +44,17 @@ func NewUpCmd(configDirFn func() string) *cobra.Command {
 		Long:  upLongDesc,
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			return runUp(configDirFn(), cfgPath)
+			return runUp(configDirFn(), cfgPath, name)
 		},
 	}
 
 	cmd.Flags().StringVar(&cfgPath, "config", "", "Path to jcard.toml (default: ./jcard.toml)")
+	cmd.Flags().StringVar(&name, "name", "", "Sandbox name, overriding the jcard's (run multiple from one workspace)")
 
 	return cmd
 }
 
-func runUp(baseDir, cfgPath string) error {
+func runUp(baseDir, cfgPath, name string) error {
 	// Resolve config path
 	if cfgPath == "" {
 		cwd, err := os.Getwd()
@@ -75,7 +82,7 @@ func runUp(baseDir, cfgPath string) error {
 	var resp *daemon.Response
 	if err := ui.Step(os.Stderr, "Starting sandbox...", func() error {
 		var stepErr error
-		resp, stepErr = c.Up("", cfgPath)
+		resp, stepErr = c.Up(name, cfgPath)
 		return stepErr
 	}); err != nil {
 		return err
