@@ -187,6 +187,16 @@ func (n *NspawnBackend) launch(ctx context.Context, inst *Instance, cfg *config.
 		return fmt.Errorf("building container root: %w", err)
 	}
 
+	// Chdir into the agent's working dir (defaults to the first shared mount's
+	// guest path) rather than a hardcoded /workspace, so the shell lands in the
+	// workspace wherever it's mounted — e.g. when the project is mounted at its
+	// host-identical path so host-absolute artifacts (.venv, devbox profiles)
+	// resolve.
+	workdir := cfg.Agent.Workdir
+	if workdir == "" {
+		workdir = "/workspace"
+	}
+
 	// Assemble the systemd-nspawn invocation. The leading args are for
 	// systemd-run (transient unit), then the nspawn command itself.
 	args := []string{
@@ -198,14 +208,14 @@ func (n *NspawnBackend) launch(ctx context.Context, inst *Instance, cfg *config.
 		"systemd-nspawn", "-q",
 		"--machine=" + machine,
 		"-D", root,
-		"--bind=/nix",          // LIVE host store + DB + daemon socket
+		"--bind=/nix",           // LIVE host store + DB + daemon socket
 		"--bind-ro=/etc/static", // NixOS /etc tree (certs, profiles)
 		"--bind-ro=/etc/ssl",
 		"--bind-ro=/etc/nix",
 		"--network-bridge=" + n.bridge,
 		"--capability=CAP_NET_ADMIN",
 		"--link-journal=no", // don't create a root-owned journal tree in the rootfs
-		"--chdir=/workspace",
+		"--chdir=" + workdir,
 		"--setenv=NIX_REMOTE=daemon",
 	}
 
@@ -316,6 +326,17 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		profile += fmt.Sprintf("export SSL_CERT_FILE=%s\nexport NIX_SSL_CERT_FILE=%s\n", caBundle, caBundle)
 	}
 
+	// UTF-8 locale, mirroring the host. Without this glibc defaults to C/POSIX
+	// (latin1), which e.g. makes the Erlang VM warn and mis-encode. LANG alone
+	// is enough (LC_* inherit it); LOCALE_ARCHIVE points glibc at the host's
+	// locale data (a bound /nix path) since /run/current-system isn't mounted.
+	sessionEnv += " LANG=en_US.UTF-8"
+	profile += "export LANG=en_US.UTF-8\n"
+	if la := resolveLocaleArchive(); la != "" {
+		sessionEnv += " LOCALE_ARCHIVE=" + la
+		profile += "export LOCALE_ARCHIVE=" + la + "\n"
+	}
+
 	machine := nspawnMachine(inst.Name)
 
 	// Mirror the operator's home-manager login shell (zsh + dotfiles) into the
@@ -334,6 +355,13 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		"etc/hosts":         fmt.Sprintf("127.0.0.1 localhost\n%s %s\n", inst.IPAddr, machine),
 		"etc/nsswitch.conf": "hosts: files dns\n",
 		"etc/resolv.conf":   "nameserver 1.1.1.1\n",
+		// The store-level zsh global rc sources /etc/zshenv only when /etc/NIXOS
+		// exists. We use that hook to defang compinit: the operator's zsh plugin
+		// dirs are bind-mounted from their home (uid != root), so as container-root
+		// compinit's compaudit flags them "insecure" and prompts. The alias makes
+		// the .zshrc's bare `compinit` run as `compinit -i` (load them, no prompt).
+		"etc/NIXOS":          "",
+		"etc/zshenv":         "alias compinit='compinit -i'\n",
 		"usr/lib/os-release": "PRETTY_NAME=\"mb nspawn sandbox\"\nID=mb-nspawn\nNAME=mb-nspawn\nVERSION_ID=1\n",
 		// Minimal sshd config: key-only root login. Host keys are generated
 		// by `ssh-keygen -A` in init.sh; AuthorizedKeysFile defaults to
@@ -720,6 +748,17 @@ func resolveOperatorShell() operatorShell {
 func dirExists(p string) bool {
 	fi, err := os.Stat(p)
 	return err == nil && fi.IsDir()
+}
+
+// resolveLocaleArchive resolves the NixOS glibc locale-archive to its store
+// path (valid inside the sandbox since /nix is bound, unlike /run/current-system).
+// Empty if absent (non-NixOS host) — callers then just leave the locale unset.
+func resolveLocaleArchive() string {
+	const def = "/run/current-system/sw/lib/locale/locale-archive"
+	if real, err := filepath.EvalSymlinks(def); err == nil && strings.HasPrefix(real, "/nix/") {
+		return real
+	}
+	return ""
 }
 
 // resolveCABundle resolves the host CA bundle to its store path, falling back
