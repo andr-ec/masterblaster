@@ -476,6 +476,18 @@ func ensureCloneStaging(instDir string, shared config.SharedMount) (string, erro
 	cmd := exec.Command("cp", "-aT", "--reflink=always", shared.Host, dst)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// The source is a LIVE tree: files (e.g. ephemeral .claude/* dirs an
+		// agent is churning) can vanish between cp's readdir and the per-file
+		// copy. cp copies everything still present but reports each gone file
+		// ("cannot stat ...: No such file or directory") and exits non-zero.
+		// Tolerate that race (rsync's exit-24 semantics): if every error line
+		// is a vanished-source ENOENT and the clone tree was created, accept
+		// it — the missing files are gone from the host anyway. Anything else
+		// (e.g. a non-reflink filesystem → "Operation not supported") stays
+		// fatal so clone mode remains a hard error on the wrong host.
+		if stat, statErr := os.Stat(dst); statErr == nil && stat.IsDir() && vanishedSourceOnly(string(out)) {
+			return dst, nil
+		}
 		// Best-effort cleanup of a partial clone — leftover bytes here
 		// would otherwise be mistaken for a cache hit next time.
 		_ = os.RemoveAll(dst)
@@ -483,6 +495,33 @@ func ensureCloneStaging(instDir string, shared config.SharedMount) (string, erro
 			shared.Host, dst, err, strings.TrimSpace(string(out)))
 	}
 	return dst, nil
+}
+
+// vanishedSourceOnly reports whether cp's stderr consists solely of
+// "source file vanished mid-copy" errors (and at least one) — i.e. lines
+// reporting a source path that disappeared after readdir but before copy,
+// all ENOENT. Any other diagnostic (unsupported reflink, permission denied,
+// no-space) makes it return false so the caller treats the clone as failed.
+func vanishedSourceOnly(stderr string) bool {
+	saw := false
+	for _, ln := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		// A vanished source surfaces as cp failing to read/stat it, ENOENT:
+		//   cp: cannot stat '/path/x': No such file or directory
+		//   cp: cannot open '/path/x' for reading: No such file or directory
+		isReadFailure := strings.Contains(ln, "cannot stat") ||
+			strings.Contains(ln, "cannot access") ||
+			strings.Contains(ln, "for reading")
+		if isReadFailure && strings.Contains(ln, "No such file or directory") {
+			saw = true
+			continue
+		}
+		return false
+	}
+	return saw
 }
 
 // cloneStagingPath returns the per-instance staging path for a clone-mode
