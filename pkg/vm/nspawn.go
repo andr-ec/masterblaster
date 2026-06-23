@@ -292,21 +292,30 @@ func (n *NspawnBackend) waitReady(ctx context.Context, machine, addr string, tim
 // SSH authorized_keys.
 func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (string, error) {
 	root := filepath.Join(inst.Dir, "root")
-	for _, d := range []string{"etc", "bin", "usr/lib", "workspace", "proc", "sys", "dev", "run", "tmp", "root/.ssh", "etc/ssh", "var/empty"} {
+	for _, d := range []string{"etc", "bin", "usr/bin", "usr/lib", "workspace", "proc", "sys", "dev", "run", "tmp", "root/.ssh", "etc/ssh", "var/empty"} {
 		if err := os.MkdirAll(filepath.Join(root, d), 0755); err != nil {
 			return "", fmt.Errorf("mkdir %s: %w", d, err)
 		}
 	}
 
-	// /bin/sh -> the live store bash (valid inside because /nix is bound).
+	// Canonical shebang targets, symlinked to the live store (valid because /nix
+	// is bound): /bin/sh + /bin/bash for `#!/bin/bash`, and /usr/bin/env for the
+	// ubiquitous `#!/usr/bin/env bash` (used by claude hook scripts, etc.) — the
+	// rootfs has no real /usr/bin otherwise.
 	bash, err := resolveHostBin("bash")
 	if err != nil {
 		return "", err
 	}
-	shPath := filepath.Join(root, "bin/sh")
-	_ = os.Remove(shPath)
-	if err := os.Symlink(bash, shPath); err != nil {
-		return "", fmt.Errorf("symlink /bin/sh: %w", err)
+	envBin, err := resolveHostBin("env")
+	if err != nil {
+		return "", err
+	}
+	for link, target := range map[string]string{"bin/sh": bash, "bin/bash": bash, "usr/bin/env": envBin} {
+		p := filepath.Join(root, link)
+		_ = os.Remove(p)
+		if err := os.Symlink(target, p); err != nil {
+			return "", fmt.Errorf("symlink /%s: %w", link, err)
+		}
 	}
 
 	// Shared PATH + cert env so SSH sessions (interactive and
@@ -416,6 +425,20 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		_ = os.Remove(dst)
 		if err := os.Symlink(src, dst); err != nil {
 			return "", fmt.Errorf("symlink %s: %w", dest, err)
+		}
+	}
+
+	// Copy the operator's claude/mcporter config into the login home. cp -aT
+	// preserves modes (creds are 0600) and symlinks (skills point into /nix);
+	// --reflink=auto makes it near-free on XFS. Copies (not symlinks) so the
+	// sandbox mutates its own state, never the host's live config.
+	for dest, src := range op.Copies {
+		dst := filepath.Join(root, dest)
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			return "", fmt.Errorf("mkdir for %s: %w", dest, err)
+		}
+		if out, err := exec.Command("cp", "-aT", "--reflink=auto", src, dst).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("copy %s: %w: %s", dest, err, strings.TrimSpace(string(out)))
 		}
 	}
 
@@ -742,7 +765,8 @@ type operatorShell struct {
 
 	ProfileBin string            // <profile>/bin, prepended to the sandbox PATH
 	ShellBin   string            // resolved zsh login shell (empty => /bin/sh)
-	Dotfiles   map[string]string // rootfs-relative dest -> resolved /nix source
+	Dotfiles   map[string]string // rootfs-relative dest -> resolved /nix source (symlinked)
+	Copies     map[string]string // rootfs-relative dest -> host source (copied, not symlinked)
 	Binds      []string          // operator-home dirs to bind read-only as-is
 }
 
@@ -751,7 +775,7 @@ type operatorShell struct {
 // caller, no per-user profile, no zsh, not on NixOS) is simply omitted,
 // degrading the sandbox toward the minimal root shell built by buildRoot.
 func resolveOperatorShell() operatorShell {
-	op := operatorShell{Dotfiles: map[string]string{}}
+	op := operatorShell{Dotfiles: map[string]string{}, Copies: map[string]string{}}
 	u, err := user.Current()
 	if err != nil || u.Uid == "0" || u.Username == "" {
 		// Root or unknown caller: no separate login user to mirror.
@@ -785,6 +809,26 @@ func resolveOperatorShell() operatorShell {
 	// resolve inside; the files under it are themselves /nix symlinks.
 	if zdir := filepath.Join(u.HomeDir, ".zsh"); dirExists(zdir) {
 		op.Binds = append(op.Binds, zdir)
+	}
+
+	// claude + mcporter config: COPY into the login home (not symlink/bind) so
+	// the sandbox comes up logged in with its plugins/hooks/skills/MCP and
+	// mutates its OWN ephemeral copy — never the operator's live host state.
+	// Curated to the config/auth bits; the huge, sandbox-irrelevant history
+	// (~/.claude/projects is hundreds of MB) is deliberately excluded.
+	for _, f := range []string{
+		".claude.json",                // config + onboarding flag + mcpServers
+		".claude/.credentials.json",   // claude + MCP OAuth tokens (mode 0600)
+		".claude/settings.json",       // user settings, enabled plugins
+		".claude/settings.local.json", //
+		".claude/plugins",             // plugin marketplaces + hook scripts
+		".claude/skills",              // /nix symlinks (resolve via bound store)
+		".mcporter",                   // mcporter credentials/config
+	} {
+		src := filepath.Join(u.HomeDir, f)
+		if _, err := os.Lstat(src); err == nil {
+			op.Copies[homeRel+"/"+f] = src
+		}
 	}
 	return op
 }
