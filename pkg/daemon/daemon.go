@@ -745,12 +745,12 @@ func (d *Daemon) instanceToInfo(mvm *managedVM) SandboxInfo {
 		info.Workdir = "/home/sb-" + inst.Name + info.Workdir[len(oldHome):]
 	}
 
-	// User is sb-<name> — the per-sandbox user mb up provisions for the
-	// harness. `mb ssh` uses this as the default --user. Container
-	// backends inject the key into /root/.ssh and have no sb-<name>
-	// user yet, so they log in as root.
+	// `mb ssh` uses info.User as the default login. Container backends (nspawn)
+	// provision the invoking operator as a non-root user and inject the key into
+	// that user's ~/.ssh, so log in as them; native uses the per-sandbox
+	// sb-<name> harness user.
 	if ipAddr != "" {
-		info.User = "root"
+		info.User = vm.OperatorUsername()
 	} else {
 		info.User = "sb-" + inst.Name
 	}
