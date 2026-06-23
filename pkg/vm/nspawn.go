@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -208,6 +209,12 @@ func (n *NspawnBackend) launch(ctx context.Context, inst *Instance, cfg *config.
 		"--setenv=NIX_REMOTE=daemon",
 	}
 
+	// Bind operator-home dirs the mirrored .zshrc references literally (e.g.
+	// ~/.zsh/plugins) read-only at the same path so those sources resolve.
+	for _, b := range resolveOperatorShell().Binds {
+		args = append(args, "--bind-ro="+b+":"+b)
+	}
+
 	// Shared mounts. clone-mode shares are reflinked into per-sandbox
 	// staging first (reusing the same helper the native backend uses).
 	for _, sh := range cfg.Shared {
@@ -310,10 +317,19 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 	}
 
 	machine := nspawnMachine(inst.Name)
+
+	// Mirror the operator's home-manager login shell (zsh + dotfiles) into the
+	// sandbox; falls back to /bin/sh when not on NixOS.
+	op := resolveOperatorShell()
+	rootShell := "/bin/sh"
+	if op.ShellBin != "" {
+		rootShell = op.ShellBin
+	}
+
 	files := map[string]string{
 		// root plus the privilege-separation user modern OpenSSH requires
 		// (its home /var/empty must exist and be root-owned).
-		"etc/passwd":        "root:x:0:0:root:/root:/bin/sh\nsshd:x:498:65534:sshd:/var/empty:/bin/sh\n",
+		"etc/passwd":        fmt.Sprintf("root:x:0:0:root:/root:%s\nsshd:x:498:65534:sshd:/var/empty:/bin/sh\n", rootShell),
 		"etc/group":         "root:x:0:\nusers:x:100:\nnogroup:x:65534:\n",
 		"etc/hosts":         fmt.Sprintf("127.0.0.1 localhost\n%s %s\n", inst.IPAddr, machine),
 		"etc/nsswitch.conf": "hosts: files dns\n",
@@ -338,6 +354,16 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 	if inst.sshPublicKey != "" {
 		if err := os.WriteFile(filepath.Join(root, "root/.ssh/authorized_keys"), []byte(inst.sshPublicKey+"\n"), 0600); err != nil {
 			return "", fmt.Errorf("write authorized_keys: %w", err)
+		}
+	}
+
+	// Symlink the operator's resolved zsh dotfiles into /root so the login shell
+	// loads the same config as the host dev VM (targets are bound /nix paths).
+	for dest, src := range op.Dotfiles {
+		dst := filepath.Join(root, dest)
+		_ = os.Remove(dst)
+		if err := os.Symlink(src, dst); err != nil {
+			return "", fmt.Errorf("symlink %s: %w", dest, err)
 		}
 	}
 
@@ -425,13 +451,20 @@ func (n *NspawnBackend) containerPathDirs() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return dedupeDirs(
+	// Prepend the operator's home-manager profile bin so the sandbox shell sees
+	// the same dev toolchain (and zsh) as the host dev VM. Empty if not on NixOS.
+	dirs := []string{}
+	if op := resolveOperatorShell(); op.ProfileBin != "" {
+		dirs = append(dirs, op.ProfileBin)
+	}
+	dirs = append(dirs,
 		filepath.Dir(mkdir),
 		filepath.Dir(bash),
 		filepath.Dir(sshd),
 		"/nix/var/nix/profiles/default/bin",
 		"/usr/bin", "/bin",
-	), nil
+	)
+	return dedupeDirs(dirs...), nil
 }
 
 // dedupeDirs returns the input dirs with duplicates removed, order preserved.
@@ -635,6 +668,58 @@ func resolveHostBin(name string) (string, error) {
 		return real, nil
 	}
 	return p, nil
+}
+
+// operatorShell mirrors the invoking user's home-manager login shell into a
+// sandbox, so a `mb ssh` session (root inside the container) gets the same zsh
+// config + dev toolchain as the host dev VM. Profile bin, shell binary, and
+// dotfile sources all live in /nix (bound into the container); Binds are
+// operator-home paths the generated .zshrc references literally and so must be
+// bind-mounted at the same path. An empty ShellBin means "fall back to bash".
+type operatorShell struct {
+	ProfileBin string            // <profile>/bin, prepended to the sandbox PATH
+	ShellBin   string            // resolved zsh for root's login shell
+	Dotfiles   map[string]string // rootfs-relative dest -> resolved /nix source
+	Binds      []string          // operator-home dirs to bind read-only as-is
+}
+
+// resolveOperatorShell inspects the invoking user's home-manager profile and
+// zsh dotfiles. It never errors: any piece that is absent (no per-user profile,
+// no zsh, not on NixOS) is simply omitted, degrading the sandbox to the minimal
+// bash shell built by buildRoot.
+func resolveOperatorShell() operatorShell {
+	op := operatorShell{Dotfiles: map[string]string{}}
+	u, err := user.Current()
+	if err != nil {
+		return op
+	}
+	// home-manager per-user profile: dev toolchain + zsh on PATH. Resolve the
+	// /etc/profiles symlink chain to its store path (valid inside the sandbox).
+	if real, err := filepath.EvalSymlinks("/etc/profiles/per-user/" + u.Username); err == nil && strings.HasPrefix(real, "/nix/") {
+		op.ProfileBin = filepath.Join(real, "bin")
+		if zsh, zerr := filepath.EvalSymlinks(filepath.Join(op.ProfileBin, "zsh")); zerr == nil && strings.HasPrefix(zsh, "/nix/") {
+			op.ShellBin = zsh
+		}
+	}
+	// zsh dotfiles are HM-managed symlinks into the store; resolve them so the
+	// rootfs symlink targets a bound /nix path, not the operator's mutable home.
+	for _, f := range []string{".zshrc", ".zshenv", ".zprofile", ".zlogin"} {
+		if real, err := filepath.EvalSymlinks(filepath.Join(u.HomeDir, f)); err == nil {
+			op.Dotfiles["root/"+f] = real
+		}
+	}
+	// The generated .zshrc hardcodes <home>/.zsh/plugins (syntax-highlighting,
+	// autopair). Bind that dir read-only at the same path so those sources
+	// resolve inside; the files under it are themselves /nix symlinks.
+	if zdir := filepath.Join(u.HomeDir, ".zsh"); dirExists(zdir) {
+		op.Binds = append(op.Binds, zdir)
+	}
+	return op
+}
+
+func dirExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && fi.IsDir()
 }
 
 // resolveCABundle resolves the host CA bundle to its store path, falling back
