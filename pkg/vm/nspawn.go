@@ -176,10 +176,11 @@ func (n *NspawnBackend) launch(ctx context.Context, inst *Instance, cfg *config.
 	defer func() {
 		if retErr != nil {
 			// Stop any partially-started container before removing its
-			// (possibly root-owned) rootfs.
+			// (possibly root-owned) rootfs + home-overlay upper.
 			_ = exec.Command("sudo", "machinectl", "terminate", machine).Run()
 			_ = exec.Command("sudo", "systemctl", "stop", machine).Run()
 			sudoRemoveAll(root)
+			_ = sudoRemoveAll(HomeOverlayBase(inst.Name))
 		}
 	}()
 
@@ -219,10 +220,22 @@ func (n *NspawnBackend) launch(ctx context.Context, inst *Instance, cfg *config.
 		"--setenv=NIX_REMOTE=daemon",
 	}
 
-	// Bind operator-home dirs the mirrored .zshrc references literally (e.g.
-	// ~/.zsh/plugins) read-only at the same path so those sources resolve.
-	for _, b := range resolveOperatorShell().Binds {
-		args = append(args, "--bind-ro="+b+":"+b)
+	// Mount the operator's ENTIRE $HOME as a copy-on-write overlay: their live
+	// home is the read-only lower layer (zero-copy — no scan, instant regardless
+	// of size), a per-sandbox dir is the writable upper. The sandbox sees every
+	// dotfile/config/credential the operator has (claude, gh, mcporter, aws, ssh,
+	// …) with no enumeration; writes land in the throwaway upper so the host home
+	// is never touched. The upper+workdir MUST live outside $HOME (overlayfs
+	// forbids upperdir under lowerdir), so they go under /var/tmp. The workspace
+	// clone is bind-mounted on top of this (below), giving the project a
+	// point-in-time snapshot rather than the live overlay view.
+	op := resolveOperatorShell()
+	if op.Home != "" {
+		upper, err := ensureHomeOverlayUpper(inst.Name)
+		if err != nil {
+			return fmt.Errorf("home overlay upper: %w", err)
+		}
+		args = append(args, "--overlay="+op.Home+":"+upper+":"+op.Home)
 	}
 
 	// Shared mounts. clone-mode shares are reflinked into per-sandbox
@@ -349,26 +362,36 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 	machine := nspawnMachine(inst.Name)
 
 	// Mirror the invoking operator into the sandbox and log in AS them (not
-	// root) — matching uid/gid/home so the reflinked workspace (already owned
-	// by this uid) and the mirrored zsh dotfiles are owned by the session user.
-	// Falls back to a root-only login when no operator could be resolved.
+	// root) — matching uid/gid/home. Their ENTIRE $HOME is overlaid in at runtime
+	// (see launch), so dotfiles/creds/all config come from the overlay; buildRoot
+	// only needs the passwd/group entry + login shell here. Falls back to a
+	// root-only login when no operator could be resolved.
 	op := resolveOperatorShell()
 	loginShell := op.ShellBin
 	if loginShell == "" {
 		loginShell = "/bin/sh"
 	}
-	// passwd/group + where the SSH key and dotfiles land (rootfs-relative home).
 	passwd := fmt.Sprintf("root:x:0:0:root:/root:%s\nsshd:x:498:65534:sshd:/var/empty:/bin/sh\n", loginShell)
 	group := "root:x:0:\nusers:x:100:\nnogroup:x:65534:\n"
-	sshHome := "root"
+	authUser := "root" // whose AuthorizedKeysFile (/etc/ssh/authorized_keys/<user>) gets the mb key
 	if op.Username != "" {
-		// root keeps /bin/sh but gets no authorized_keys, so only the operator
-		// can log in. The operator's gid group replaces the placeholder `users`.
+		// root keeps /bin/sh but gets no key, so only the operator can log in.
+		// The operator's gid group replaces the placeholder `users`.
 		passwd = fmt.Sprintf(
 			"root:x:0:0:root:/root:/bin/sh\n%s:x:%s:%s:%s:%s:%s\nsshd:x:498:65534:sshd:/var/empty:/bin/sh\n",
 			op.Username, op.Uid, op.Gid, op.Username, op.Home, loginShell)
 		group = fmt.Sprintf("root:x:0:\n%s:x:%s:\nnogroup:x:65534:\n", op.GroupName, op.Gid)
-		sshHome = strings.TrimPrefix(op.Home, "/")
+		authUser = op.Username
+	}
+
+	// Pre-create the operator home path in the rootfs so the runtime home
+	// overlay (launch, --overlay=$HOME:upper:$HOME) has a mount point. nspawn
+	// creates only the final overlay dir, not its parents (e.g. /home), so
+	// without this the mount fails with "No such file or directory".
+	if op.Home != "" {
+		if err := os.MkdirAll(filepath.Join(root, strings.TrimPrefix(op.Home, "/")), 0755); err != nil {
+			return "", fmt.Errorf("mkdir operator home %s: %w", op.Home, err)
+		}
 	}
 
 	files := map[string]string{
@@ -379,19 +402,18 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		"etc/hosts":         fmt.Sprintf("127.0.0.1 localhost\n%s %s\n", inst.IPAddr, machine),
 		"etc/nsswitch.conf": "hosts: files dns\n",
 		"etc/resolv.conf":   "nameserver 1.1.1.1\n",
-		// The store-level zsh global rc sources /etc/zshenv only when /etc/NIXOS
-		// exists. We use that hook to defang compinit: the operator's zsh plugin
-		// dirs are bind-mounted from their home (uid != root), so as container-root
-		// compinit's compaudit flags them "insecure" and prompts. The alias makes
-		// the .zshrc's bare `compinit` run as `compinit -i` (load them, no prompt).
+		// /etc/NIXOS makes the store-level zsh global rc source our /etc/zshenv;
+		// the compinit -i alias is a harmless belt-and-suspenders against the
+		// insecure-directories prompt.
 		"etc/NIXOS":          "",
 		"etc/zshenv":         "alias compinit='compinit -i'\n",
 		"usr/lib/os-release": "PRETTY_NAME=\"mb nspawn sandbox\"\nID=mb-nspawn\nNAME=mb-nspawn\nVERSION_ID=1\n",
-		// Minimal sshd config: key-only login (as the operator user, or root in
-		// the fallback). Host keys are generated by `ssh-keygen -A` in init.sh;
-		// AuthorizedKeysFile defaults to ~/.ssh/authorized_keys per user, where
-		// buildRoot injects the pubkey. StrictModes off keeps ownership lenient.
-		"etc/ssh/sshd_config": "Port 22\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nSetEnv " + sessionEnv + "\n",
+		// Minimal sshd config: key-only login (operator user, or root fallback).
+		// Host keys come from `ssh-keygen -A` in init.sh. AuthorizedKeysFile points
+		// at a ROOTFS path (not ~/.ssh) so auth is independent of the home overlay;
+		// buildRoot writes the ephemeral mb key to /etc/ssh/authorized_keys/<user>.
+		// StrictModes off keeps ownership/mode lenient.
+		"etc/ssh/sshd_config": "Port 22\nPermitRootLogin prohibit-password\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nUsePAM no\nStrictModes no\nAuthorizedKeysFile /etc/ssh/authorized_keys/%u\nSetEnv " + sessionEnv + "\n",
 		// Sourced by interactive login shells (`mb ssh`). SetEnv above
 		// covers non-interactive `ssh host cmd`; this is the belt-and-
 		// suspenders for an interactive shell that resets PATH.
@@ -403,42 +425,17 @@ func (n *NspawnBackend) buildRoot(inst *Instance, cfg *config.JcardConfig) (stri
 		}
 	}
 
-	// Inject the ephemeral SSH public key into the login user's home. For a
-	// non-root operator this dir lives under /home/<user> and is created here
-	// (owned by the invoking uid, since the vmhost runs as them — matching the
-	// session user); the static dir list already made root/.ssh for the
-	// fallback. StrictModes is off in sshd_config so ownership/mode are lenient.
-	if err := os.MkdirAll(filepath.Join(root, sshHome, ".ssh"), 0700); err != nil {
-		return "", fmt.Errorf("mkdir %s/.ssh: %w", sshHome, err)
-	}
+	// Inject the ephemeral SSH public key at the rootfs AuthorizedKeysFile path
+	// (sshd_config above), so SSH auth doesn't depend on the home overlay. The
+	// operator's own dotfiles/creds/config all arrive via that overlay (launch),
+	// so there is nothing else to mirror here.
 	if inst.sshPublicKey != "" {
-		if err := os.WriteFile(filepath.Join(root, sshHome, ".ssh/authorized_keys"), []byte(inst.sshPublicKey+"\n"), 0600); err != nil {
+		akDir := filepath.Join(root, "etc/ssh/authorized_keys")
+		if err := os.MkdirAll(akDir, 0755); err != nil {
+			return "", fmt.Errorf("mkdir authorized_keys dir: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(akDir, authUser), []byte(inst.sshPublicKey+"\n"), 0644); err != nil {
 			return "", fmt.Errorf("write authorized_keys: %w", err)
-		}
-	}
-
-	// Symlink the operator's resolved zsh dotfiles into the login user's home so
-	// the shell loads the same config as the host dev VM (targets are bound /nix
-	// paths; dests are keyed under the operator home by resolveOperatorShell).
-	for dest, src := range op.Dotfiles {
-		dst := filepath.Join(root, dest)
-		_ = os.Remove(dst)
-		if err := os.Symlink(src, dst); err != nil {
-			return "", fmt.Errorf("symlink %s: %w", dest, err)
-		}
-	}
-
-	// Copy the operator's claude/mcporter config into the login home. cp -aT
-	// preserves modes (creds are 0600) and symlinks (skills point into /nix);
-	// --reflink=auto makes it near-free on XFS. Copies (not symlinks) so the
-	// sandbox mutates its own state, never the host's live config.
-	for dest, src := range op.Copies {
-		dst := filepath.Join(root, dest)
-		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-			return "", fmt.Errorf("mkdir for %s: %w", dest, err)
-		}
-		if out, err := exec.Command("cp", "-aT", "--reflink=auto", src, dst).CombinedOutput(); err != nil {
-			return "", fmt.Errorf("copy %s: %w: %s", dest, err, strings.TrimSpace(string(out)))
 		}
 	}
 
@@ -580,13 +577,18 @@ func (n *NspawnBackend) ForceDown(_ context.Context, inst *Instance) error {
 
 // Destroy terminates the sandbox and removes its on-disk resources. The
 // transient unit owns the veth, which systemd-nspawn tears down on exit; the
-// reflinked clone staging lives under inst.Dir and goes with it.
+// reflinked clone staging lives under inst.Dir and goes with it. The home
+// overlay's writable upper lives outside inst.Dir (under /var/tmp) and is
+// removed separately.
 func (n *NspawnBackend) Destroy(ctx context.Context, inst *Instance) error {
 	_ = n.ForceDown(ctx, inst)
-	// The rootfs holds root-owned files the container created (host keys,
-	// any root-owned writes), so a user-level RemoveAll can't delete it.
+	// The rootfs + overlay upper hold root-owned files the container created
+	// (host keys, the nspawn overlay workdir), so removal needs sudo.
 	if err := sudoRemoveAll(inst.Dir); err != nil {
 		return fmt.Errorf("removing instance directory: %w", err)
+	}
+	if err := sudoRemoveAll(HomeOverlayBase(inst.Name)); err != nil {
+		return fmt.Errorf("removing home overlay dir: %w", err)
 	}
 	return nil
 }
@@ -704,6 +706,24 @@ func PrepareNspawnDir(baseDir string, inst *Instance) error {
 	return nil
 }
 
+// homeOverlayBase is the per-sandbox dir holding the home overlay's writable
+// upper + nspawn-created workdir. It MUST live outside the operator $HOME
+// (overlayfs forbids upperdir under lowerdir, and inst.Dir is under $HOME), so
+// it sits under /var/tmp on the same host filesystem.
+func HomeOverlayBase(name string) string {
+	return filepath.Join("/var/tmp/mb-home", name)
+}
+
+// ensureHomeOverlayUpper idempotently creates the writable upper dir for the
+// home overlay and returns it; nspawn creates the overlayfs workdir alongside.
+func ensureHomeOverlayUpper(name string) (string, error) {
+	upper := filepath.Join(HomeOverlayBase(name), "upper")
+	if err := os.MkdirAll(upper, 0755); err != nil {
+		return "", err
+	}
+	return upper, nil
+}
+
 // sudoRemoveAll removes a path that may contain root-owned files created by
 // the container. Best-effort: returns the command error if it fails.
 func sudoRemoveAll(path string) error {
@@ -745,37 +765,30 @@ func resolveHostBin(name string) (string, error) {
 	return p, nil
 }
 
-// operatorShell mirrors the invoking user INTO a sandbox: the sandbox logs in
-// as that same user (matching uid/gid/name/home), not root, so `mb ssh` lands
-// in the host dev-VM experience — same zsh config + dev toolchain, file
-// ownership that matches the reflinked workspace (already uid==operator), and
-// no root foot-guns (e.g. `claude --dangerously-skip-permissions` refusing to
-// run as root, or compinit flagging the bind-mounted dotfiles "insecure").
-//
-// Profile bin, shell, and dotfile sources all live in /nix (bound into the
-// container); Binds are operator-home paths the generated .zshrc references
-// literally and so must be bind-mounted at the same path. An empty Username
-// means "couldn't resolve a non-root operator" — buildRoot then falls back to
-// the minimal root-only shell.
+// operatorShell describes the invoking user so the sandbox can log in AS them
+// (matching uid/gid/name/home), not root — giving the host dev-VM experience,
+// file ownership that matches the workspace, and no root foot-guns (e.g.
+// `claude --dangerously-skip-permissions` refusing root). The operator's entire
+// $HOME is overlaid into the sandbox at runtime (launch), so every dotfile,
+// credential, and tool config comes from there — buildRoot needs only the
+// identity + login shell. An empty Username means "couldn't resolve a non-root
+// operator", and buildRoot falls back to the minimal root-only shell.
 type operatorShell struct {
 	Username  string // login user inside the sandbox; "" => root-only fallback
 	Uid, Gid  string // numeric, for /etc/passwd
 	GroupName string // primary group name, for /etc/group
-	Home      string // login user's home (e.g. /home/andre)
+	Home      string // login user's home (e.g. /home/andre) — also the overlay mount
 
-	ProfileBin string            // <profile>/bin, prepended to the sandbox PATH
-	ShellBin   string            // resolved zsh login shell (empty => /bin/sh)
-	Dotfiles   map[string]string // rootfs-relative dest -> resolved /nix source (symlinked)
-	Copies     map[string]string // rootfs-relative dest -> host source (copied, not symlinked)
-	Binds      []string          // operator-home dirs to bind read-only as-is
+	ProfileBin string // <profile>/bin, prepended to the sandbox PATH
+	ShellBin   string // resolved zsh login shell (empty => /bin/sh)
 }
 
-// resolveOperatorShell inspects the invoking user's identity, home-manager
-// profile, and zsh dotfiles. It never errors: any piece that is absent (root
-// caller, no per-user profile, no zsh, not on NixOS) is simply omitted,
-// degrading the sandbox toward the minimal root shell built by buildRoot.
+// resolveOperatorShell inspects the invoking user's identity + home-manager
+// profile. It never errors: any piece that is absent (root caller, no per-user
+// profile, no zsh, not on NixOS) is simply omitted, degrading the sandbox
+// toward the minimal root shell built by buildRoot.
 func resolveOperatorShell() operatorShell {
-	op := operatorShell{Dotfiles: map[string]string{}, Copies: map[string]string{}}
+	var op operatorShell
 	u, err := user.Current()
 	if err != nil || u.Uid == "0" || u.Username == "" {
 		// Root or unknown caller: no separate login user to mirror.
@@ -786,7 +799,6 @@ func resolveOperatorShell() operatorShell {
 	if g, gerr := user.LookupGroupId(u.Gid); gerr == nil && g.Name != "" {
 		op.GroupName = g.Name
 	}
-	homeRel := strings.TrimPrefix(u.HomeDir, "/")
 
 	// home-manager per-user profile: dev toolchain + zsh on PATH. Resolve the
 	// /etc/profiles symlink chain to its store path (valid inside the sandbox).
@@ -794,40 +806,6 @@ func resolveOperatorShell() operatorShell {
 		op.ProfileBin = filepath.Join(real, "bin")
 		if zsh, zerr := filepath.EvalSymlinks(filepath.Join(op.ProfileBin, "zsh")); zerr == nil && strings.HasPrefix(zsh, "/nix/") {
 			op.ShellBin = zsh
-		}
-	}
-	// zsh dotfiles are HM-managed symlinks into the store; resolve them so the
-	// rootfs symlink targets a bound /nix path, not the operator's mutable home.
-	// Placed under the operator's home so the login user reads them as ~/.
-	for _, f := range []string{".zshrc", ".zshenv", ".zprofile", ".zlogin"} {
-		if real, err := filepath.EvalSymlinks(filepath.Join(u.HomeDir, f)); err == nil {
-			op.Dotfiles[homeRel+"/"+f] = real
-		}
-	}
-	// The generated .zshrc hardcodes <home>/.zsh/plugins (syntax-highlighting,
-	// autopair). Bind that dir read-only at the same path so those sources
-	// resolve inside; the files under it are themselves /nix symlinks.
-	if zdir := filepath.Join(u.HomeDir, ".zsh"); dirExists(zdir) {
-		op.Binds = append(op.Binds, zdir)
-	}
-
-	// claude + mcporter config: COPY into the login home (not symlink/bind) so
-	// the sandbox comes up logged in with its plugins/hooks/skills/MCP and
-	// mutates its OWN ephemeral copy — never the operator's live host state.
-	// Curated to the config/auth bits; the huge, sandbox-irrelevant history
-	// (~/.claude/projects is hundreds of MB) is deliberately excluded.
-	for _, f := range []string{
-		".claude.json",                // config + onboarding flag + mcpServers
-		".claude/.credentials.json",   // claude + MCP OAuth tokens (mode 0600)
-		".claude/settings.json",       // user settings, enabled plugins
-		".claude/settings.local.json", //
-		".claude/plugins",             // plugin marketplaces + hook scripts
-		".claude/skills",              // /nix symlinks (resolve via bound store)
-		".mcporter",                   // mcporter credentials/config
-	} {
-		src := filepath.Join(u.HomeDir, f)
-		if _, err := os.Lstat(src); err == nil {
-			op.Copies[homeRel+"/"+f] = src
 		}
 	}
 	return op
@@ -841,11 +819,6 @@ func OperatorUsername() string {
 		return u.Username
 	}
 	return "root"
-}
-
-func dirExists(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && fi.IsDir()
 }
 
 // resolveLocaleArchive resolves the NixOS glibc locale-archive to its store

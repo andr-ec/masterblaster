@@ -812,6 +812,14 @@ func destroyNspawnRuntime(inst *vm.Instance) {
 			log.Printf("destroy %s: sudo rm -rf %s: %v: %s", inst.Name, inst.Dir, err, strings.TrimSpace(string(out)))
 		}
 	}
+	// The home-overlay writable upper lives outside inst.Dir (under /var/tmp,
+	// since overlayfs forbids upperdir under the lowerdir $HOME) and holds the
+	// sandbox's home writes, so remove it separately.
+	if overlay := vm.HomeOverlayBase(inst.Name); overlay != "" {
+		if out, err := exec.Command("sudo", "rm", "-rf", overlay).CombinedOutput(); err != nil {
+			log.Printf("destroy %s: sudo rm -rf %s: %v: %s", inst.Name, overlay, err, strings.TrimSpace(string(out)))
+		}
+	}
 }
 
 // resolveBackend determines the backend type for a VM. Precedence:
